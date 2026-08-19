@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CovertComm</string>
+
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_hosting">Hosting</string>
+    <string name="status_rendezvous">Rendezvous…</string>
+
+    <string name="mode_hotspot">Hotspot</string>
+    <string name="mode_rendezvous">Rendezvous</string>
+    <string name="host_ip_hint">Host IP Address</string>
+    <string name="host_started">Hotspot started</string>
+    <string name="host_failed">Cannot create hotspot. Enable manually.</string>
+    <string name="wipe_messages">Wipe All Messages</string>
+    <string name="secure_session">Secure session established</string>
+    <string name="no_session">No secure session. Connect first.</string>
+    <string name="decryption_failed">Decryption failed</string>
+    <string name="burn_after_read">Burn After Read</string>
+    <string name="send">Send</string>
+    <string name="message_hint">Type a message…</string>
+    <string name="safety_number">Safety Number</string>
+
+    <string name="passphrase_hint">Enter shared passphrase</string>
+    <string name="start_rendezvous">Start</string>
+    <string name="rendezvous_countdown">%1$d seconds remaining</string>
+    <string name="rendezvous_matched">Passphrase matched. Connecting…</string>
+    <string name="rendezvous_failed">Rendezvous failed: %1$s</string>
+    <string name="rendezvous_expired">Window expired</string>
+    <string name="rendezvous_advertising">Broadcasting challenge (45s window)</string>
+
+    <string name="perm_rationale">Location, Wi-Fi, and Bluetooth permissions are required for communication.</string>
+    <string name="pq_established">Post-quantum channel established (ML-KEM-768)</string>
+    <string name="pq_exchange">PQ key exchange in progress</string>
+</resources>
