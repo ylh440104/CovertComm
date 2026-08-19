@@ -1,0 +1,5 @@
+-keepattributes *Annotation*
+-keep class com.covertcomm.app.** { *; }
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
+-dontwarn javax.naming.**
