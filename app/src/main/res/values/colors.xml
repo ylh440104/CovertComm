@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="cc_background">#FF0D1117</color>
+    <color name="cc_surface">#FF161B22</color>
+    <color name="cc_surface_variant">#FF21262D</color>
+    <color name="cc_primary">#FF1F6FEB</color>
+    <color name="cc_on_primary">#FFFFFFFF</color>
+    <color name="cc_primary_container">#FF0D2D5C</color>
+    <color name="cc_text_primary">#FFE6EDF3</color>
+    <color name="cc_text_secondary">#FF8B949E</color>
+    <color name="cc_outgoing_bg">#FF1F6FEB</color>
+    <color name="cc_incoming_bg">#FF21262D</color>
+    <color name="cc_border">#FF30363D</color>
+    <color name="cc_green">#FF3FB950</color>
+    <color name="cc_red">#FFF85149</color>
+</resources>
