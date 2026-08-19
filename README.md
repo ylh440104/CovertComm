@@ -44,7 +44,7 @@ Offline & online, end-to-end encrypted P2P messaging for Android.
 
 ### Build Steps
 ```bash
-git clone https://github.com/yourname/CovertComm.git
+git clone https://github.com/ylh440104/CovertComm.git
 cd CovertComm
 ./gradlew assembleDebug
 ```
