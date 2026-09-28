@@ -562,6 +562,15 @@ class MainActivity : ComponentActivity() {
 
     private fun encodeKey(key: ByteArray): String = Base64.encodeToString(key, Base64.NO_WRAP)
 
+    // Temporary diagnostic: records the handshake/decrypt state to a file on the
+    // device so the key-agreement mismatch can be inspected without a debugger.
+    private fun diag(msg: String) {
+        try {
+            val f = java.io.File("/sdcard/Download/cc_diag.log")
+            java.io.FileOutputStream(f, true).bufferedWriter().use { it.appendLine("${System.currentTimeMillis()} $msg") }
+        } catch (_: Exception) {}
+    }
+
     private fun handleIncomingMessage(data: ByteArray) {
         try { val json = JSONObject(String(data, Charsets.UTF_8)); when (json.optString("type")) { "handshake" -> handleHandshake(json); "pq_exchange" -> handlePQExchange(json); "msg" -> handleEncryptedMessage(json) } } catch (_: Exception) {}
         SecurityGuard.wipeMemory(data)
@@ -571,6 +580,7 @@ class MainActivity : ComponentActivity() {
         try {
             val k = json.getJSONObject("keys")
             val theirIdentity = k.getString("identityKey")
+            diag("HS recv theirId=" + CryptoUtils.sha256(CryptoUtils.decodeKey(theirIdentity)).copyOfRange(0,4).joinToString(""){"%02x".format(it)} + " hsSent=" + handshakeSent + " pqExch=" + pqExchanged + " pqKeyPresent=" + k.optString("pqPublicKey","").isNotEmpty())
             // Hard guard against processing our own handshake. On MQTT the broker
             // echoes our PUBLISH back to us; if such an echo reaches here it would
             // overwrite the pending bundle with our own keys and make both peers
@@ -643,6 +653,11 @@ class MainActivity : ComponentActivity() {
             pqDecapsulated
         )
         ratchet.initialize(result, identityManager.identityKeyPair!!.publicKey, CryptoUtils.decodeKey(bundle.identityKey))
+        diag("INIT rootKey=" + CryptoUtils.sha256(result.rootKey).copyOfRange(0,8).joinToString(""){"%02x".format(it)} +
+             " chainKey=" + CryptoUtils.sha256(result.chainKey).copyOfRange(0,8).joinToString(""){"%02x".format(it)} +
+             " myId=" + CryptoUtils.sha256(identityManager.identityKeyPair!!.publicKey).copyOfRange(0,4).joinToString(""){"%02x".format(it)} +
+             " theirId=" + CryptoUtils.sha256(CryptoUtils.decodeKey(bundle.identityKey)).copyOfRange(0,4).joinToString(""){"%02x".format(it)} +
+             " pqEnc=" + (pqEncapsulated != null) + " pqDec=" + (pqDecapsulated != null))
         // Derive a separate MAC key (don't reuse the ratchet chain key) so both
         // peers can authenticate mesh frames with a domain-separated key.
         val macKey = CryptoUtils.hkdf(result.chainKey, info = "mesh_mac_key".toByteArray())
@@ -693,7 +708,7 @@ class MainActivity : ComponentActivity() {
                 }.start()
             }
             CryptoUtils.wipe(padded); CryptoUtils.wipe(pt)
-        } catch (_: Exception) { messages.add(ChatMessage("[Decrypt failed]", false)) }
+        } catch (e: Exception) { diag("DECRYPT_FAIL num=" + runCatching { json.getInt("num") }.getOrDefault(-1) + " " + e.message); messages.add(ChatMessage("[Decrypt failed]", false)) }
     }
 
     private val hotspotListener = object : HotspotTransport.HotspotListener {
