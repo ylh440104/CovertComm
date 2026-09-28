@@ -14,6 +14,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.covertcomm.app.crypto.IdentityManager
+import com.covertcomm.app.mesh.FragmentAssembler
+import com.covertcomm.app.mesh.FragmentCodec
 import com.covertcomm.app.mesh.MeshFrame
 import com.covertcomm.app.mesh.MeshRouter
 import com.covertcomm.app.security.SecurityGuard

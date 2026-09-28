@@ -17,6 +17,8 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 import com.covertcomm.app.crypto.CryptoUtils
 import com.covertcomm.app.crypto.IdentityManager
+import com.covertcomm.app.mesh.FragmentAssembler
+import com.covertcomm.app.mesh.FragmentCodec
 import com.covertcomm.app.mesh.MeshFrame
 import com.covertcomm.app.mesh.MeshRouter
 
