@@ -570,8 +570,16 @@ class MainActivity : ComponentActivity() {
     private fun handleHandshake(json: JSONObject) {
         try {
             val k = json.getJSONObject("keys")
+            val theirIdentity = k.getString("identityKey")
+            // Hard guard against processing our own handshake. On MQTT the broker
+            // echoes our PUBLISH back to us; if such an echo reaches here it would
+            // overwrite the pending bundle with our own keys and make both peers
+            // believe they are the same role, breaking key agreement.
+            if (theirIdentity == encodeKey(identityManager.identityKeyPair!!.publicKey)) {
+                return
+            }
             val bundle = X3DH.PreKeyBundle(
-                k.getString("identityKey"),
+                theirIdentity,
                 k.getString("preKey"),
                 k.getString("dhKey"),
                 k.optString("fingerprint")

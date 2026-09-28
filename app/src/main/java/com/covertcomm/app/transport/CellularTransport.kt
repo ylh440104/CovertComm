@@ -293,9 +293,11 @@ class CellularTransport(
 
     private fun handleIncoming(payload: ByteArray) {
         val key = sessionKey ?: return
-        // Drop the broker's echo of our own PUBLISH (see ownEchoes).
+        // Drop the broker's echo of our own PUBLISH. The entry is NOT removed on
+        // match: a QoS1 retransmission can deliver the same echo more than once,
+        // and removing it would let the duplicate through on the second copy.
         val echo = echoKey(payload)
-        if (ownEchoes.remove(echo) != null) {
+        if (ownEchoes.containsKey(echo)) {
             trace("ignored own echo")
             return
         }
