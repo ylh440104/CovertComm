@@ -173,9 +173,7 @@ class WifiAwareTransport(
     private var messageId = 0
     private val MESSAGE_MAX_NAN = 255
     private val FRAG_MAGIC: Byte = 0x7A
-    private val fragBuffer = java.util.concurrent.ConcurrentHashMap<Int, ByteArray>()
-    private val fragTotal = java.util.concurrent.ConcurrentHashMap<Int, Int>()
-    private val fragCount = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    private val assembler = FragmentAssembler()
 
     fun sendData(data: ByteArray) {
         val session = if (isHost) publishSession else subscribeSession
@@ -184,30 +182,16 @@ class WifiAwareTransport(
             listener?.onTransportError("No NAN session or peer")
             return
         }
-
-        if (data.size <= MESSAGE_MAX_NAN - 6) {
-            val frag = ByteArray(data.size + 6)
-            frag[0] = FRAG_MAGIC
-            frag[1] = (messageId shr 8).toByte(); frag[2] = messageId.toByte()
-            frag[3] = 0; frag[4] = 1
-            frag[5] = (data.size and 0xFF).toByte()
-            System.arraycopy(data, 0, frag, 6, data.size)
-            messageId++
-            sendNan(session, peer, frag)
-        } else {
-            val mid = messageId++
-            val chunks = data.toList().chunked(MESSAGE_MAX_NAN - 6).map { it.toByteArray() }
-            val total = chunks.size
-            for ((idx, chunk) in chunks.withIndex()) {
-                val frag = ByteArray(chunk.size + 6)
-                frag[0] = FRAG_MAGIC
-                frag[1] = (mid shr 8).toByte(); frag[2] = mid.toByte()
-                frag[3] = idx.toByte(); frag[4] = total.toByte()
-                frag[5] = (chunk.size and 0xFF).toByte()
-                System.arraycopy(chunk, 0, frag, 6, chunk.size)
-                sendNan(session, peer, frag)
-            }
+        // Leave room for the fragment header within the NAN message limit.
+        val chunk = (MESSAGE_MAX_NAN - FragmentCodec.HEADER).coerceAtLeast(16)
+        val mid = messageId++
+        val fragments = try {
+            FragmentCodec.fragment(FRAG_MAGIC, mid, data, chunk)
+        } catch (e: Exception) {
+            listener?.onTransportError("Frame too large for NAN: ${data.size} bytes")
+            return
         }
+        for (f in fragments) sendNan(session, peer, f)
     }
 
     private fun sendNan(session: android.net.wifi.aware.DiscoverySession, peer: PeerHandle, data: ByteArray) {
@@ -237,40 +221,13 @@ class WifiAwareTransport(
     }
 
     private fun handleIncomingMessage(data: ByteArray) {
-        if (data.size < 6 || data[0] != FRAG_MAGIC) {
+        val packet = FragmentCodec.decode(FRAG_MAGIC, data)
+        if (packet == null) {
             listener?.onMessageReceived(data, ByteArray(2))
             return
         }
-
-        val mid = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
-        val fragIdx = data[3].toInt() and 0xFF
-        val total = data[4].toInt() and 0xFF
-        val payloadLen = data[5].toInt() and 0xFF
-        if (payloadLen > data.size - 6) return
-        val payload = data.copyOfRange(6, 6 + payloadLen)
-
-        if (total <= 1) {
-            handleAssembledFrame(payload)
-            return
-        }
-
-        val chunk = MESSAGE_MAX_NAN - 6
-        val buffer = fragBuffer.getOrPut(mid) { ByteArray(total * chunk) }
-        val received = fragCount.getOrPut(mid) { 0 }
-        synchronized(buffer) {
-            val offset = fragIdx * chunk
-            if (offset + payload.size <= buffer.size) {
-                System.arraycopy(payload, 0, buffer, offset, payload.size)
-            }
-        }
-        fragCount[mid] = received + 1
-
-        if (received + 1 >= total) {
-            fragBuffer.remove(mid)
-            fragCount.remove(mid)
-            fragTotal.remove(mid)
-            handleAssembledFrame(buffer)
-        }
+        val full = assembler.offer(packet) ?: return
+        handleAssembledFrame(full)
     }
 
     private fun handleAssembledFrame(frameBytes: ByteArray) {
@@ -306,9 +263,7 @@ class WifiAwareTransport(
         peerHandle = null
         awareSession = null
         passphrase = null
-        fragBuffer.clear()
-        fragCount.clear()
-        fragTotal.clear()
+        assembler.clear()
         router?.wipe()
     }
 }

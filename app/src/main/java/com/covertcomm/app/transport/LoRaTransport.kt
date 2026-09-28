@@ -26,8 +26,8 @@ class LoRaTransport(
 
     companion object {
         const val LORA_MAX_PACKET = 255
-        const val LORA_HEADER_SIZE = 5
-        const val LORA_MAX_PAYLOAD = LORA_MAX_PACKET - LORA_HEADER_SIZE
+        // Payload available to the fragment codec inside one LoRa packet.
+        const val LORA_MAX_PAYLOAD = LORA_MAX_PACKET - FragmentCodec.HEADER
         const val LORA_MAGIC: Byte = 0x7C
         const val LORA_BAUD = 9600
         const val FRAGMENT_TIMEOUT_MS = 30000L
@@ -44,8 +44,7 @@ class LoRaTransport(
     private var router: MeshRouter? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    private val fragmentBuffers = mutableMapOf<Int, FragmentAssembly>()
-    private val mutex = Any()
+    private val assembler = FragmentAssembler(maxFrame = 64 * 1024, timeoutMs = FRAGMENT_TIMEOUT_MS)
 
     var listener: LoRaListener? = null
 
@@ -59,13 +58,6 @@ class LoRaTransport(
         fun onDeviceDetached()
         fun onReady()
     }
-
-    private data class FragmentAssembly(
-        val totalFragments: Int,
-        val received: BooleanArray,
-        val buffer: ByteArray,
-        val timestamp: Long
-    )
 
     fun init(router: MeshRouter): Boolean {
         this.router = router
@@ -242,45 +234,9 @@ class LoRaTransport(
     }
 
     private fun processSinglePacket(packet: ByteArray) {
-        if (packet.size < LORA_HEADER_SIZE) return
-        if (packet[0] != LORA_MAGIC) return
-
-        val msgId = (packet[1].toInt() and 0xFF)
-        val fragIdx = (packet[2].toInt() and 0xFF)
-        val totalFrags = (packet[3].toInt() and 0xFF)
-        val payloadLen = (packet[4].toInt() and 0xFF)
-        val payload = packet.copyOfRange(5, 5 + payloadLen)
-
-        if (payloadLen > LORA_MAX_PAYLOAD || payload.size < payloadLen) return
-
-        if (totalFrags == 1 && fragIdx == 0) {
-            handleAssembledFrameComplete(payload)
-            return
-        }
-
-        val fragmentSize = LORA_MAX_PAYLOAD
-        val totalSize = fragmentSize * (totalFrags - 1) + payloadLen
-        val assembly = synchronized(mutex) {
-            fragmentBuffers.getOrPut(msgId) {
-                FragmentAssembly(totalFrags, BooleanArray(totalFrags), ByteArray(totalSize), System.currentTimeMillis())
-            }
-        }
-
-        synchronized(mutex) {
-            if (fragIdx < totalFrags - 1) {
-                System.arraycopy(payload, 0, assembly.buffer, fragIdx * fragmentSize, payload.size)
-            } else {
-                System.arraycopy(payload, 0, assembly.buffer, (totalFrags - 1) * fragmentSize, payload.size)
-            }
-            assembly.received[fragIdx] = true
-
-            if (assembly.received.all { it }) {
-                fragmentBuffers.remove(msgId)
-                handleAssembledFrameComplete(assembly.buffer)
-            }
-        }
-
-        purgeStaleFragments()
+        val decoded = FragmentCodec.decode(LORA_MAGIC, packet) ?: return
+        val full = assembler.offer(decoded) ?: return
+        handleAssembledFrameComplete(full)
     }
 
     private fun handleAssembledFrameComplete(frameBytes: ByteArray) {
@@ -289,16 +245,6 @@ class LoRaTransport(
             router!!.processIncomingFrame(frame, ByteArray(2))
         } else {
             listener?.onMessageReceived(frameBytes, ByteArray(2))
-        }
-    }
-
-    private fun purgeStaleFragments() {
-        val now = System.currentTimeMillis()
-        synchronized(mutex) {
-            val iter = fragmentBuffers.entries.iterator()
-            while (iter.hasNext()) {
-                if (now - iter.next().value.timestamp > FRAGMENT_TIMEOUT_MS) iter.remove()
-            }
         }
     }
 
@@ -328,43 +274,25 @@ class LoRaTransport(
     }
 
     private fun sendFrame(frameBytes: ByteArray) {
-        if (frameBytes.size <= LORA_MAX_PAYLOAD) {
-            sendLoRaPacket(1, 0, 1, frameBytes)
-        } else {
-            sendFragmentedFrame(frameBytes)
-        }
-    }
-
-    private fun sendFragmentedFrame(frameBytes: ByteArray) {
+        // The 8-byte fragment header must fit inside a single LoRa packet.
+        val chunk = LORA_MAX_PAYLOAD
         val msgId = (SecurityGuard.secureRandomBytes(1)[0].toInt() and 0xFF)
-        val totalFrags = (frameBytes.size + LORA_MAX_PAYLOAD - 1) / LORA_MAX_PAYLOAD
-        if (totalFrags > 250) {
-            listener?.onTransportError("Frame too large for LoRa: ${frameBytes.size} bytes ($totalFrags fragments)")
+        val fragments = try {
+            FragmentCodec.fragment(LORA_MAGIC, msgId, frameBytes, chunk)
+        } catch (e: Exception) {
+            listener?.onTransportError("Frame too large for LoRa: ${frameBytes.size} bytes")
             return
         }
-
-        var offset = 0
-        for (i in 0 until totalFrags) {
-            val chunkSize = if (i < totalFrags - 1) LORA_MAX_PAYLOAD else frameBytes.size - offset
-            val chunk = frameBytes.copyOfRange(offset, offset + chunkSize)
-            sendLoRaPacket(msgId, i, totalFrags, chunk)
-            offset += chunkSize
-
+        for ((i, f) in fragments.withIndex()) {
+            sendLoRaPacket(f)
+            // Give the radio time to drain before the next fragment.
             try {
-                Thread.sleep(if (totalFrags > 10) 2000L else 500L)
+                Thread.sleep(if (fragments.size > 10) 2000L else 500L)
             } catch (_: InterruptedException) {}
         }
     }
 
-    private fun sendLoRaPacket(msgId: Int, fragIdx: Int, totalFrags: Int, payload: ByteArray) {
-        val packet = ByteArray(LORA_HEADER_SIZE + payload.size)
-        packet[0] = LORA_MAGIC
-        packet[1] = msgId.toByte()
-        packet[2] = fragIdx.toByte()
-        packet[3] = (if (totalFrags == 0) 1 else totalFrags).toByte()
-        packet[4] = payload.size.toByte()
-        System.arraycopy(payload, 0, packet, 5, payload.size)
-
+    private fun sendLoRaPacket(packet: ByteArray) {
         val atCmd = "AT+SEND=${packet.size}\r\n"
         serialWrite(atCmd.toByteArray())
         try { Thread.sleep(50) } catch (_: InterruptedException) {}
@@ -406,7 +334,7 @@ class LoRaTransport(
         connection?.close()
         connection = null
         connectedDevice = null
-        synchronized(mutex) { fragmentBuffers.clear() }
+        assembler.clear()
     }
 
     fun close() {

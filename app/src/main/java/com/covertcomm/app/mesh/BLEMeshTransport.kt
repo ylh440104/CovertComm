@@ -53,7 +53,7 @@ class BLEMeshTransport(
     @Volatile private var negotiatedMtu = 23
 
     private val msgIdGen = AtomicInteger(0)
-    private val reassembly = ConcurrentHashMap<Int, Assembly>()
+    private val assembler = FragmentAssembler(MAX_FRAME)
 
     var listener: BLEMeshListener? = null
 
@@ -68,8 +68,6 @@ class BLEMeshTransport(
         fun onAdvertiseStarted()
     }
 
-    private class Assembly(val total: Int, val buffer: ByteArray, var received: Int, val timestamp: Long)
-
     companion object {
         val SERVICE_UUID: UUID = UUID.fromString("a1b2c3d4-e5f6-7890-abcd-ef0123456789")
         val CHAR_TX_UUID: UUID = UUID.fromString("a1b2c3d4-e5f6-7890-abcd-ef0123456790")
@@ -77,9 +75,7 @@ class BLEMeshTransport(
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         private const val FRAG_MAGIC: Byte = 0x7B
-        private const val FRAG_HEADER = 6
         private const val REQUESTED_MTU = 517
-        private const val ASSEMBLY_TIMEOUT_MS = 20000L
         private const val MAX_FRAME = 64 * 1024
     }
 
@@ -388,34 +384,14 @@ class BLEMeshTransport(
     @Suppress("DEPRECATION")
     private fun sendRawFrame(frameBytes: ByteArray) {
         val chunk = (negotiatedMtu - 3).coerceAtLeast(20)
-        if (frameBytes.size <= chunk) {
-            writePacket(buildPacket(0, 0, 1, frameBytes))
-            return
-        }
-        val total = (frameBytes.size + chunk - 1) / chunk
-        if (total > 255) {
+        val msgId = msgIdGen.incrementAndGet() and 0xFFFF
+        val fragments = try {
+            FragmentCodec.fragment(FRAG_MAGIC, msgId, frameBytes, chunk)
+        } catch (e: Exception) {
             listener?.onTransportError("Frame too large for BLE: ${frameBytes.size} bytes")
             return
         }
-        val msgId = msgIdGen.incrementAndGet() and 0xFFFF
-        var offset = 0
-        for (i in 0 until total) {
-            val end = minOf(offset + chunk, frameBytes.size)
-            writePacket(buildPacket(msgId, i, total, frameBytes.copyOfRange(offset, end)))
-            offset = end
-        }
-    }
-
-    private fun buildPacket(msgId: Int, index: Int, total: Int, payload: ByteArray): ByteArray {
-        val out = ByteArray(FRAG_HEADER + payload.size)
-        out[0] = FRAG_MAGIC
-        out[1] = ((msgId shr 8) and 0xFF).toByte()
-        out[2] = (msgId and 0xFF).toByte()
-        out[3] = index.toByte()
-        out[4] = total.toByte()
-        out[5] = payload.size.toByte()
-        System.arraycopy(payload, 0, out, FRAG_HEADER, payload.size)
-        return out
+        for (f in fragments) writePacket(f)
     }
 
     @Suppress("DEPRECATION")
@@ -456,44 +432,14 @@ class BLEMeshTransport(
     }
 
     private fun handleIncomingBytes(data: ByteArray) {
-        if (data.size < FRAG_HEADER || data[0] != FRAG_MAGIC) {
+        val packet = FragmentCodec.decode(FRAG_MAGIC, data)
+        if (packet == null) {
             // Not a fragment envelope: treat as a complete frame.
             handleAssembled(data)
             return
         }
-
-        val msgId = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
-        val index = data[3].toInt() and 0xFF
-        val total = data[4].toInt() and 0xFF
-        val len = data[5].toInt() and 0xFF
-        if (len > data.size - FRAG_HEADER) return
-        val payload = data.copyOfRange(FRAG_HEADER, FRAG_HEADER + len)
-
-        if (total <= 1) {
-            handleAssembled(payload)
-            return
-        }
-
-        val now = System.currentTimeMillis()
-        val chunkSize = (negotiatedMtu - 3).coerceAtLeast(20)
-        val assembly = reassembly.getOrPut(msgId) {
-            Assembly(total, ByteArray(MAX_FRAME), 0, now)
-        }
-        synchronized(assembly) {
-            val offset = index * chunkSize
-            if (offset + payload.size <= assembly.buffer.size) {
-                System.arraycopy(payload, 0, assembly.buffer, offset, payload.size)
-            }
-            assembly.received++
-            if (assembly.received >= assembly.total) {
-                reassembly.remove(msgId)
-                // Trim to the actual frame length, which is stored in the mesh
-                // frame header (payload length at a fixed offset).
-                val full = trimToFrame(assembly.buffer)
-                handleAssembled(full)
-            }
-        }
-        purgeStaleAssemblies(now)
+        val full = assembler.offer(packet) ?: return
+        handleAssembled(trimToFrame(full))
     }
 
     private fun trimToFrame(buffer: ByteArray): ByteArray {
@@ -503,13 +449,6 @@ class BLEMeshTransport(
         val payloadLen = ((buffer[12].toInt() and 0xFF) shl 8) or (buffer[13].toInt() and 0xFF)
         val frameLen = MeshFrame.HEADER_SIZE + payloadLen + MeshFrame.HMAC_SIZE
         return if (frameLen in MeshFrame.HEADER_SIZE..buffer.size) buffer.copyOfRange(0, frameLen) else buffer
-    }
-
-    private fun purgeStaleAssemblies(now: Long) {
-        val iter = reassembly.entries.iterator()
-        while (iter.hasNext()) {
-            if (now - iter.next().value.timestamp > ASSEMBLY_TIMEOUT_MS) iter.remove()
-        }
     }
 
     private fun handleAssembled(frameBytes: ByteArray) {
@@ -556,7 +495,7 @@ class BLEMeshTransport(
         }
         clientGatts.clear()
         serverDevices.clear()
-        reassembly.clear()
+        assembler.clear()
 
         try { connectedGatt?.disconnect(); connectedGatt?.close() } catch (_: Exception) {}
         try { gattServer?.close() } catch (_: Exception) {}
