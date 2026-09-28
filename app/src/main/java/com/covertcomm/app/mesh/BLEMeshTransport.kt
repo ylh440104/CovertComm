@@ -295,7 +295,9 @@ class BLEMeshTransport(
 
                 override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
                     if (descriptor.uuid == CCCD_UUID) {
-                        sendHandshakeOverGATT(g)
+                        // Subscription is ready; the app now drives the handshake
+                        // through the normal sendControl path.
+                        listener?.onPeerConnected(g.device.address)
                     }
                 }
 
@@ -309,16 +311,6 @@ class BLEMeshTransport(
             Log.e(TAG, "Connect failed", e)
             listener?.onTransportError("Connection failed: ${e.message}")
         }
-    }
-
-    private fun sendHandshakeOverGATT(gatt: BluetoothGatt) {
-        val session = rendezvousSession ?: return
-        val payload = RendezvousProtocol.generateAdvertiseData(session)
-        val senderFP = identityManager.getShortFingerprint().substring(0, 2).toByteArray()
-        val seqNum = router?.nextSeqNum() ?: 0
-        val frame = MeshFrame.create(MeshFrame.TYPE_HANDSHAKE, senderFP, ByteArray(2), payload, seqNum)
-        sendRawFrame(frame.toBytes())
-        listener?.onHandshakeSent()
     }
 
     private fun startGattServer() {
@@ -428,26 +420,9 @@ class BLEMeshTransport(
 
     @Suppress("DEPRECATION")
     private fun writePacket(packet: ByteArray) {
-        // Central role: write to the peripheral's RX characteristic.
-        val gatt = connectedGatt
-        if (gatt != null && clientGatts.isNotEmpty()) {
-            val service = gatt.getService(SERVICE_UUID)
-            val char = service?.getCharacteristic(CHAR_RX_UUID)
-            if (char != null) {
-                try {
-                    char.value = packet
-                    char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                    gatt.writeCharacteristic(char)
-                } catch (e: Exception) {
-                    Log.e(TAG, "write failed", e)
-                }
-            }
-            return
-        }
-
-        // Peripheral role: notify every subscribed central.
+        // Peripheral role: if we have connected centrals, notify them.
         val server = gattServer
-        if (server != null) {
+        if (serverDevices.isNotEmpty() && server != null) {
             val service = server.getService(SERVICE_UUID)
             val char = service?.getCharacteristic(CHAR_TX_UUID)
             if (char != null) {
@@ -458,6 +433,23 @@ class BLEMeshTransport(
                     } catch (e: Exception) {
                         Log.e(TAG, "notify failed", e)
                     }
+                }
+            }
+            return
+        }
+
+        // Central role: write to the peripheral's RX characteristic.
+        val gatt = connectedGatt
+        if (gatt != null) {
+            val service = gatt.getService(SERVICE_UUID)
+            val char = service?.getCharacteristic(CHAR_RX_UUID)
+            if (char != null) {
+                try {
+                    char.value = packet
+                    char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    gatt.writeCharacteristic(char)
+                } catch (e: Exception) {
+                    Log.e(TAG, "write failed", e)
                 }
             }
         }

@@ -14,7 +14,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.covertcomm.app.crypto.IdentityManager
-import com.covertcomm.app.security.SecurityGuard
 import java.io.*
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -136,7 +135,6 @@ class WifiDirectTransport(
                     clientSocket = client
                     listener?.onPeerConnected(client.inetAddress.hostAddress ?: "p2p-peer")
                     handleClient(client)
-                    sendHandshake()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "P2P server error", e)
@@ -152,7 +150,6 @@ class WifiDirectTransport(
                 clientSocket?.connect(InetSocketAddress(hostAddress, port), 15000)
                 clientSocket?.soTimeout = 0
                 clientSocket?.let {
-                    sendHandshake()
                     listener?.onPeerConnected(hostAddress)
                     handleClient(it)
                 }
@@ -196,22 +193,6 @@ class WifiDirectTransport(
                 listener?.onTransportError(e.message ?: "P2P send failed")
             }
         }.start()
-    }
-
-    private fun sendHandshake() {
-        val keys = identityManager.exportEncodedPublicKeys()
-        val sb = StringBuilder("{\"type\":\"handshake\",\"keys\":{")
-        var first = true
-        for ((k, v) in keys) {
-            if (!first) sb.append(",")
-            sb.append("\"").append(k).append("\":\"").append(v).append("\"")
-            first = false
-        }
-        sb.append("}}")
-        val data = sb.toString().toByteArray()
-        sendData(data)
-        listener?.onHandshakeSent()
-        SecurityGuard.wipeStringBuilder(sb)
     }
 
     private fun registerReceiver() {

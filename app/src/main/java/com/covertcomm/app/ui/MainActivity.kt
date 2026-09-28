@@ -724,7 +724,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val hotspotListener = object : HotspotTransport.HotspotListener {
-        override fun onPeerConnected(a: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[Link: $a]", false)) } }
+        override fun onPeerConnected(a: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[Link: $a]", false)); if (!handshakeSent) sendHandshake() } }
         override fun onPeerDisconnected() { runOnUiThread { statusText.value = "Lost"; statusConnected.value = false; if (::ratchet.isInitialized) ratchet.wipe(); messages.add(ChatMessage("[Link lost]", false)) } }
         override fun onMessageReceived(d: ByteArray) { runOnUiThread { handleIncomingMessage(d) } }
         override fun onTransportError(e: String) { runOnUiThread { messages.add(ChatMessage("[$e]", false)) } }
@@ -734,7 +734,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val bleListener = object : BLEMeshTransport.BLEMeshListener {
-        override fun onPeerConnected(a: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[BLE link: $a]", false)) } }
+        override fun onPeerConnected(a: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[BLE link: $a]", false)); if (!handshakeSent) sendHandshake() } }
         override fun onPeerDisconnected() { runOnUiThread { statusText.value = "Lost"; statusConnected.value = false; if (::ratchet.isInitialized) ratchet.wipe(); if (::meshRouter.isInitialized) meshRouter.flushRoutes(); messages.add(ChatMessage("[BLE lost]", false)) } }
         override fun onMessageReceived(d: ByteArray, s: ByteArray) { runOnUiThread { handleIncomingMessage(d) } }
         override fun onTransportError(e: String) { runOnUiThread { messages.add(ChatMessage("[$e]", false)) } }
@@ -745,7 +745,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val loraListener = object : LoRaTransport.LoRaListener {
-        override fun onPeerConnected(a: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[LoRa link]", false)) } }
+        override fun onPeerConnected(a: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[LoRa link]", false)); if (!handshakeSent) sendHandshake() } }
         override fun onPeerDisconnected() { runOnUiThread { statusText.value = "Lost"; statusConnected.value = false; if (::ratchet.isInitialized) ratchet.wipe(); messages.add(ChatMessage("[LoRa lost]", false)) } }
         override fun onMessageReceived(d: ByteArray, s: ByteArray) { runOnUiThread { handleIncomingMessage(d) } }
         override fun onTransportError(e: String) { runOnUiThread { messages.add(ChatMessage("[$e]", false)) } }
@@ -756,7 +756,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val awareListener = object : WifiAwareTransport.WifiAwareListener {
-        override fun onPeerConnected(address: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[NAN link]", false)) } }
+        override fun onPeerConnected(address: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[NAN link]", false)); if (!handshakeSent) sendHandshake() } }
         override fun onPeerDisconnected() { runOnUiThread { statusText.value = "Lost"; statusConnected.value = false; if (::ratchet.isInitialized) ratchet.wipe(); messages.add(ChatMessage("[NAN lost]", false)) } }
         override fun onMessageReceived(data: ByteArray, senderFP: ByteArray) { runOnUiThread { handleIncomingMessage(data) } }
         override fun onTransportError(error: String) { runOnUiThread { messages.add(ChatMessage("[$error]", false)) } }
@@ -767,7 +767,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val p2pListener = object : WifiDirectTransport.WifiDirectListener {
-        override fun onPeerConnected(address: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[P2P link: $address]", false)) } }
+        override fun onPeerConnected(address: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[P2P link: $address]", false)); if (!handshakeSent) sendHandshake() } }
         override fun onPeerDisconnected() { runOnUiThread { statusText.value = "Lost"; statusConnected.value = false; if (::ratchet.isInitialized) ratchet.wipe(); messages.add(ChatMessage("[P2P lost]", false)) } }
         override fun onMessageReceived(data: ByteArray) { runOnUiThread { handleIncomingMessage(data) } }
         override fun onTransportError(error: String) { runOnUiThread { messages.add(ChatMessage("[$error]", false)) } }

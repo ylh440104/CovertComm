@@ -19,7 +19,6 @@ import com.covertcomm.app.crypto.CryptoUtils
 import com.covertcomm.app.crypto.IdentityManager
 import com.covertcomm.app.mesh.MeshFrame
 import com.covertcomm.app.mesh.MeshRouter
-import com.covertcomm.app.security.SecurityGuard
 
 @RequiresApi(Build.VERSION_CODES.O)
 class WifiAwareTransport(
@@ -118,7 +117,6 @@ class WifiAwareTransport(
                 if (!statusConnected) {
                     listener?.onPeerConnected("nan:peer")
                     statusConnected = true
-                    sendHandshake()
                 }
                 handleIncomingMessage(message)
             }
@@ -236,24 +234,6 @@ class WifiAwareTransport(
         // Always go through the fragment envelope; chunking the raw frame bytes
         // here would bypass reassembly on the other side.
         sendData(frame.toBytes())
-    }
-
-    private fun sendHandshake() {
-        if (isHost) {
-            val keys = identityManager.exportEncodedPublicKeys()
-            val sb = StringBuilder("{\"type\":\"handshake\",\"keys\":{")
-            var first = true
-            for ((k, v) in keys) {
-                if (!first) sb.append(",")
-                sb.append("\"").append(k).append("\":\"").append(v).append("\"")
-                first = false
-            }
-            sb.append("}}")
-            val data = sb.toString().toByteArray()
-            sendData(data)
-            listener?.onHandshakeSent()
-            SecurityGuard.wipeStringBuilder(sb)
-        }
     }
 
     private fun handleIncomingMessage(data: ByteArray) {

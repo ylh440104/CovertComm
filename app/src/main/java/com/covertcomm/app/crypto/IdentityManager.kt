@@ -75,6 +75,23 @@ class IdentityManager(context: Context) {
         )
     }
 
+    /**
+     * The JSON handshake the peer expects ("type":"handshake" with a "keys"
+     * object). Shared by the transports so every mode sends the same payload.
+     */
+    fun handshakeJson(): String {
+        val keys = exportEncodedPublicKeys()
+        val sb = StringBuilder("{\"type\":\"handshake\",\"keys\":{")
+        var first = true
+        for ((k, v) in keys) {
+            if (!first) sb.append(",")
+            sb.append("\"").append(k).append("\":\"").append(v).append("\"")
+            first = false
+        }
+        sb.append("}}")
+        return sb.toString()
+    }
+
     fun exportPQPublicKey(): String {
         return PostQuantumKEM.encodePublicKey(pqKeyPair?.publicKey ?: ByteArray(0))
     }

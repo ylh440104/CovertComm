@@ -101,7 +101,10 @@ class HotspotTransport(
                         clientSocket = client
                         listener?.onPeerConnected(client.inetAddress.hostAddress ?: "unknown")
                         handleClient(client)
-                        sendHandshake()
+                        // No handshake is sent here: the app drives the handshake
+                        // through sendControl() once a peer is connected. Sending a
+                        // second, differently-shaped handshake from the transport
+                        // used to race with the real one.
                     } catch (e: SocketTimeoutException) {
                         continue
                     }
@@ -120,7 +123,6 @@ class HotspotTransport(
                 clientSocket?.connect(InetSocketAddress(hostAddress, port), 15000)
                 clientSocket?.soTimeout = 0
                 clientSocket?.let {
-                    sendHandshake()
                     listener?.onPeerConnected(hostAddress)
                     handleClient(it)
                 }
@@ -164,22 +166,6 @@ class HotspotTransport(
                 listener?.onTransportError(e.message ?: "Send failed")
             }
         }.start()
-    }
-
-    private fun sendHandshake() {
-        val keys = identityManager.exportEncodedPublicKeys()
-        val sb = StringBuilder("{\"type\":\"handshake\",\"keys\":{")
-        var first = true
-        for ((k, v) in keys) {
-            if (!first) sb.append(",")
-            sb.append("\"").append(k).append("\":\"").append(v).append("\"")
-            first = false
-        }
-        sb.append("}}")
-        val data = sb.toString().toByteArray()
-        sendData(data)
-        listener?.onHandshakeSent()
-        SecurityGuard.wipeStringBuilder(sb)
     }
 
     private fun getServerIpAddress(): String {
