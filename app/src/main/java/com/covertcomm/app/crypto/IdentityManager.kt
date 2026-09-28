@@ -1,7 +1,6 @@
 package com.covertcomm.app.crypto
 
 import android.content.Context
-import android.util.Base64
 
 class IdentityManager(context: Context) {
 
@@ -58,7 +57,7 @@ class IdentityManager(context: Context) {
 
     fun getSafetyNumber(theirIdentityPubEncoded: String): String {
         val myPub = identityKeyPair!!.publicKey
-        val theirPub = Base64.decode(theirIdentityPubEncoded, Base64.NO_WRAP)
+        val theirPub = java.util.Base64.getDecoder().decode(theirIdentityPubEncoded)
         return CryptoUtils.computeSafetyNumber(myPub, theirPub)
     }
 

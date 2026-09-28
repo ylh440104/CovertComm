@@ -8,7 +8,6 @@ import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
-import android.util.Base64
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -162,11 +161,11 @@ object CryptoUtils {
     }
 
     fun encodeKey(key: ByteArray): String {
-        return Base64.encodeToString(key, Base64.NO_WRAP)
+        return java.util.Base64.getEncoder().withoutPadding().encodeToString(key)
     }
 
     fun decodeKey(encoded: String): ByteArray {
-        return Base64.decode(encoded, Base64.NO_WRAP)
+        return java.util.Base64.getDecoder().decode(encoded)
     }
 
     fun computeSafetyNumber(myIdentityPub: ByteArray, theirIdentityPub: ByteArray): String {

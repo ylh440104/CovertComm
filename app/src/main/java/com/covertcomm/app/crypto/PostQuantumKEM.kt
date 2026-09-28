@@ -1,6 +1,5 @@
 package com.covertcomm.app.crypto
 
-import android.util.Base64
 import org.bouncycastle.crypto.SecretWithEncapsulation
 import org.bouncycastle.pqc.crypto.crystals.kyber.KyberKEMExtractor
 import org.bouncycastle.pqc.crypto.crystals.kyber.KyberKEMGenerator
@@ -53,11 +52,11 @@ object PostQuantumKEM {
     }
 
     fun encodePublicKey(key: ByteArray): String {
-        return Base64.encodeToString(key, Base64.NO_WRAP)
+        return java.util.Base64.getEncoder().withoutPadding().encodeToString(key)
     }
 
     fun decodePublicKey(encoded: String): ByteArray {
-        return Base64.decode(encoded, Base64.NO_WRAP)
+        return java.util.Base64.getDecoder().decode(encoded)
     }
 
     fun wipeKeyPair(kp: PQKeyPair) {

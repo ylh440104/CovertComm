@@ -530,6 +530,7 @@ class MainActivity : ComponentActivity() {
         val plaintext = text.toByteArray(Charsets.UTF_8)
         val padded = CryptoUtils.padWithLengthPrefix(plaintext)
         val rm = ratchet.encrypt(padded)
+        diag("SEND num=" + rm.messageNumber + " sendKey=" + ratchet.debugSendKey(rm.messageNumber) + " " + ratchet.debugChains())
         val json = JSONObject()
         json.put("type", "msg"); json.put("dhPublicKey", rm.dhPublicKey); json.put("pnum", rm.previousMessageNumber); json.put("num", rm.messageNumber)
         json.put("burn", burnAfterRead)
@@ -571,6 +572,9 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) {}
     }
 
+    private fun fpOf(b: ByteArray): String =
+        CryptoUtils.sha256(b).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
+
     private fun handleIncomingMessage(data: ByteArray) {
         try { val json = JSONObject(String(data, Charsets.UTF_8)); when (json.optString("type")) { "handshake" -> handleHandshake(json); "pq_exchange" -> handlePQExchange(json); "msg" -> handleEncryptedMessage(json) } } catch (_: Exception) {}
         SecurityGuard.wipeMemory(data)
@@ -580,7 +584,7 @@ class MainActivity : ComponentActivity() {
         try {
             val k = json.getJSONObject("keys")
             val theirIdentity = k.getString("identityKey")
-            diag("HS recv theirId=" + CryptoUtils.sha256(CryptoUtils.decodeKey(theirIdentity)).copyOfRange(0,4).joinToString(""){"%02x".format(it)} + " hsSent=" + handshakeSent + " pqExch=" + pqExchanged + " pqKeyPresent=" + k.optString("pqPublicKey","").isNotEmpty())
+            diag("HS recv theirId=" + CryptoUtils.sha256(CryptoUtils.decodeKey(theirIdentity)).copyOfRange(0,4).joinToString(""){"%02x".format(it)} + " hsSent=" + handshakeSent + " pqExch=" + pqExchanged + " pqKeyPresent=" + k.optString("pqPublicKey","").isNotEmpty() + " myPq=" + (identityManager.pqKeyPair != null))
             // Hard guard against processing our own handshake. On MQTT the broker
             // echoes our PUBLISH back to us; if such an echo reaches here it would
             // overwrite the pending bundle with our own keys and make both peers
@@ -624,7 +628,9 @@ class MainActivity : ComponentActivity() {
 
     private fun handlePQExchange(json: JSONObject) {
         try {
-            pendingPQDecapsulated = identityManager.decapsulatePQ(Base64.decode(json.getString("ciphertext"), Base64.NO_WRAP))
+            val ct = Base64.decode(json.getString("ciphertext"), Base64.NO_WRAP)
+            pendingPQDecapsulated = identityManager.decapsulatePQ(ct)
+            diag("PQ_EXCH recv ctLen=" + ct.size + " decOk=" + (pendingPQDecapsulated != null) + " bundlePresent=" + (pendingHandshakeBundle != null) + " encPresent=" + (pendingPQEncapsulated != null))
             tryInitRatchetWithPQ()
         } catch (_: Exception) {}
     }
@@ -658,6 +664,11 @@ class MainActivity : ComponentActivity() {
              " myId=" + CryptoUtils.sha256(identityManager.identityKeyPair!!.publicKey).copyOfRange(0,4).joinToString(""){"%02x".format(it)} +
              " theirId=" + CryptoUtils.sha256(CryptoUtils.decodeKey(bundle.identityKey)).copyOfRange(0,4).joinToString(""){"%02x".format(it)} +
              " pqEnc=" + (pqEncapsulated != null) + " pqDec=" + (pqDecapsulated != null))
+        diag("  " + X3DH.debugLog)
+        diag("  keys myPre=" + fpOf(identityManager.preKeyPair!!.publicKey) +
+             " myDh=" + fpOf(identityManager.currentDHKeyPair!!.publicKey) +
+             " theirPre=" + fpOf(CryptoUtils.decodeKey(bundle.preKey)) +
+             " theirDh=" + fpOf(CryptoUtils.decodeKey(bundle.dhKey)))
         // Derive a separate MAC key (don't reuse the ratchet chain key) so both
         // peers can authenticate mesh frames with a domain-separated key.
         val macKey = CryptoUtils.hkdf(result.chainKey, info = "mesh_mac_key".toByteArray())
@@ -696,6 +707,7 @@ class MainActivity : ComponentActivity() {
         if (!::ratchet.isInitialized || !ratchet.initialized) { messages.add(ChatMessage("[No session]", false)); return }
         try {
             val rm = DoubleRatchet.RatchetMessage(json.getString("dhPublicKey"), json.getInt("pnum"), json.getInt("num"), Base64.decode(json.getString("nonce"), Base64.NO_WRAP), Base64.decode(json.getString("ciphertext"), Base64.NO_WRAP))
+            diag("RECV num=" + rm.messageNumber + " expectRecvKey=" + ratchet.debugRecvKey(rm.messageNumber) + " " + ratchet.debugChains())
             val padded = ratchet.decrypt(rm); val pt = CryptoUtils.unpadWithLengthPrefix(padded); val text = String(pt, Charsets.UTF_8)
             val burn = json.optBoolean("burn", false)
             messages.add(ChatMessage(text, false, burnAfterRead = burn))

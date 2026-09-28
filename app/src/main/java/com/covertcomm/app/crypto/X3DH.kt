@@ -13,6 +13,12 @@ package com.covertcomm.app.crypto
  */
 object X3DH {
 
+    /** Diagnostic switch. Set false to disable the verbose debugLog. */
+    var DEBUG = true
+
+    /** Diagnostic only: last derivation detail, read by MainActivity.diag(). */
+    @Volatile var debugLog: String = ""
+
     data class PreKeyBundle(
         val identityKey: String,
         val preKey: String,
@@ -75,6 +81,13 @@ object X3DH {
 
         val rootKey = CryptoUtils.hkdf(combined, salt = pqSalt, info = "X3DH_RootKey".toByteArray())
         val chainKey = CryptoUtils.hkdf(rootKey, info = "X3DH_ChainKey".toByteArray())
+
+        if (DEBUG) {
+            fun fp(b: ByteArray) = CryptoUtils.sha256(b).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
+            val orderedFp = ordered.joinToString(",") { fp(it) }
+            val pqFp = pqParts.joinToString(",") { fp(it) }
+            X3DH.debugLog = "X3DH dh1=${fp(dh1)} dh2=${fp(dh2)} dh3=${fp(dh3)} ordered=[$orderedFp] pq=[$pqFp] salt=${fp(pqSalt)} root=${fp(rootKey)} chain=${fp(chainKey)}"
+        }
 
         CryptoUtils.wipe(dh1); CryptoUtils.wipe(dh2); CryptoUtils.wipe(dh3)
         CryptoUtils.wipe(combined)

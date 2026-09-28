@@ -13,8 +13,11 @@ package com.covertcomm.app.crypto
  * Replay protection: each inbound index is consumed exactly once per direction.
  */
 class DoubleRatchet(
-    private val identityManager: IdentityManager
+    private val dhPublicKeyProvider: () -> String
 ) {
+    /** Convenience constructor used by the app. */
+    constructor(identityManager: IdentityManager) : this({ identityManager.exportDHPublicKey() })
+
     private var rootKey: ByteArray = ByteArray(0)
     private var sendChainKey: ByteArray = ByteArray(0)
     private var recvChainKey: ByteArray = ByteArray(0)
@@ -58,7 +61,7 @@ class DoubleRatchet(
 
         val payload = CryptoUtils.encryptAESGCM(messageKey, plaintext)
         val msg = RatchetMessage(
-            dhPublicKey = identityManager.exportDHPublicKey(),
+            dhPublicKey = dhPublicKeyProvider(),
             previousMessageNumber = 0,
             messageNumber = index,
             nonce = payload.nonce,
@@ -96,6 +99,28 @@ class DoubleRatchet(
                 index.toByte()
             )
         )
+    }
+
+    /** Diagnostic only: short fingerprints of the active chains. */
+    fun debugChains(): String {
+        fun fp(b: ByteArray) = CryptoUtils.sha256(b).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
+        return "sendChain=" + fp(sendChainKey) + " recvChain=" + fp(recvChainKey) + " sendCnt=" + sendCounter
+    }
+
+    /** Diagnostic only: fingerprint of the key that would decrypt [index]. */
+    fun debugRecvKey(index: Int): String {
+        val k = deriveMessageKey(recvChainKey, index)
+        val fp = CryptoUtils.sha256(k).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
+        CryptoUtils.wipe(k)
+        return fp
+    }
+
+    /** Diagnostic only: fingerprint of the key used to encrypt [index]. */
+    fun debugSendKey(index: Int): String {
+        val k = deriveMessageKey(sendChainKey, index)
+        val fp = CryptoUtils.sha256(k).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
+        CryptoUtils.wipe(k)
+        return fp
     }
 
     private fun evict(map: LinkedHashMap<Int, ByteArray>) {
