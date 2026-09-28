@@ -46,7 +46,8 @@ class DoubleRatchet(
         val iAmA = compareBytes(myIdentityPub, theirIdentityPub) <= 0
         sendChainKey = if (iAmA) chainA else chainB
         recvChainKey = if (iAmA) chainB else chainA
-        CryptoUtils.wipe(if (iAmA) chainB else chainA)
+        // Do NOT wipe the "unused" chain here: sendChainKey/recvChainKey are
+        // references, so wiping would zero the array the ratchet is using.
         sendCounter = 0
         consumedRecv.clear()
         usedSendKeys.clear()
