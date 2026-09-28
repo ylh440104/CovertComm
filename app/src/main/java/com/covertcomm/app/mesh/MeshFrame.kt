@@ -19,6 +19,32 @@ object MeshFrame {
     const val MAX_PAYLOAD = 4096
     const val MAX_FRAME_SIZE = FRAME_OVERHEAD + MAX_PAYLOAD
 
+    // Legacy constant, only used before a real MAC key is installed so that
+    // pre-handshake control frames (route probes) still round-trip.
+    private val LEGACY_KEY = "mesh_hmac".toByteArray()
+
+    @Volatile private var macKey: ByteArray? = null
+
+    /**
+     * Installs the shared MAC key used for frame integrity. Both peers must set
+     * the same key (e.g. derived from the agreed session) for frames to verify.
+     * Passing null restores the legacy pre-handshake behaviour.
+     */
+    fun setMacKey(key: ByteArray?) {
+        macKey = key?.copyOf()
+    }
+
+    private fun computeMac(data: ByteArray): ByteArray {
+        val key = macKey
+        return if (key != null && key.isNotEmpty()) {
+            CryptoUtils.hmacSha256(key, data)
+        } else {
+            // Not a real MAC, but keeps the frame format stable and still detects
+            // accidental corruption before a session key exists.
+            CryptoUtils.sha256(data + LEGACY_KEY)
+        }
+    }
+
     data class Frame(
         val version: Byte,
         val type: Byte,
@@ -41,9 +67,9 @@ object MeshFrame {
             buf.putInt(seqNum)
             buf.putShort(payload.size.toShort())
             buf.put(payload)
-            val withoutHmac = buf.array().copyOfRange(0, HEADER_SIZE + payload.size)
-            val hmacCalc = CryptoUtils.sha256(withoutHmac + "mesh_hmac".toByteArray())
-            buf.put(hmacCalc)
+            val withoutMac = buf.array().copyOfRange(0, HEADER_SIZE + payload.size)
+            val mac = computeMac(withoutMac)
+            buf.put(mac)
             return buf.array()
         }
 
@@ -87,10 +113,8 @@ object MeshFrame {
         buf.get(payload)
         val hmac = ByteArray(HMAC_SIZE)
         buf.get(hmac)
-        val hmacCalc = CryptoUtils.sha256(
-            bytes.copyOfRange(0, HEADER_SIZE + payloadLen) + "mesh_hmac".toByteArray()
-        )
-        if (!hmac.contentEquals(hmacCalc)) return null
+        val expected = computeMac(bytes.copyOfRange(0, HEADER_SIZE + payloadLen))
+        if (!hmac.contentEquals(expected)) return null
         return Frame(version, type, senderFP, targetFP, ttl, hops, seqNum, payload, hmac)
     }
 
@@ -102,19 +126,18 @@ object MeshFrame {
         seqNum: Int,
         ttl: Byte = MAX_TTL
     ): Frame {
-        val hmac = CryptoUtils.sha256(
-            ByteBuffer.allocate(HEADER_SIZE + payload.size).apply {
-                put(VERSION)
-                put(type)
-                put(senderFP)
-                put(targetFP)
-                put(ttl)
-                put(0.toByte())
-                putInt(seqNum)
-                putShort(payload.size.toShort())
-                put(payload)
-            }.array() + "mesh_hmac".toByteArray()
-        )
-        return Frame(VERSION, type, senderFP, targetFP, ttl, 0, seqNum, payload, hmac)
+        val header = ByteBuffer.allocate(HEADER_SIZE + payload.size).apply {
+            put(VERSION)
+            put(type)
+            put(senderFP)
+            put(targetFP)
+            put(ttl)
+            put(0.toByte())
+            putInt(seqNum)
+            putShort(payload.size.toShort())
+            put(payload)
+        }.array()
+        val mac = computeMac(header)
+        return Frame(VERSION, type, senderFP, targetFP, ttl, 0, seqNum, payload, mac)
     }
 }

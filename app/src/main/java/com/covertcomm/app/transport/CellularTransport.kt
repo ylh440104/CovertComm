@@ -1,62 +1,74 @@
 package com.covertcomm.app.transport
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import com.covertcomm.app.crypto.CryptoUtils
 import com.covertcomm.app.crypto.IdentityManager
+import com.covertcomm.app.crypto.NestedCipher
 import com.covertcomm.app.security.SecurityGuard
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.EOFException
+import java.io.IOException
+import java.net.InetSocketAddress
 import java.net.Socket
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentHashMap
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 
+/**
+ * Global messaging transport over MQTT 3.1.1 to a public or custom broker.
+ *
+ * Fixes in this revision:
+ *  - PUBLISH parsing consumes the packet identifier for QoS > 0, so inbound
+ *    payloads are no longer shifted by two bytes (which broke every decrypt).
+ *  - PUBACK is returned for inbound QoS1 messages.
+ *  - CONNACK / SUBACK are validated instead of being blindly skipped.
+ *  - A PINGREQ keepalive thread stops the broker from dropping an idle link.
+ *  - Automatic reconnect with exponential backoff.
+ *  - Passphrase -> key derivation hardened with PBKDF2-HMAC-SHA256.
+ */
 class CellularTransport(
     private val context: Context,
     private val identityManager: IdentityManager
 ) {
+    private companion object {
+        const val BROKER_HOST = "broker.hivemq.com"
+        const val BROKER_PORT = 1883
+        const val KEEPALIVE_S = 30
+        const val TOPIC_PREFIX = "cc/"
+        const val CONNECT_TIMEOUT_MS = 15000
+        const val MAX_REMAINING = 1 shl 20
+        const val PBKDF2_ITERATIONS = 100_000
+        const val TRACE = false
+
+        const val PKT_PUBLISH = 3
+    }
+
     private val TAG = "CellularTransport"
-    private val handler = Handler(Looper.getMainLooper())
 
-    private fun trace(msg: String) {
-        try {
-            val pid = android.os.Process.myPid()
-            val pkg = context.packageName
-            val f = java.io.File("/sdcard/Download/cc_trace_${pkg.replace('.','_')}.log")
-            java.io.FileOutputStream(f, true).bufferedWriter().use { it.appendLine("${System.currentTimeMillis()} $pid $msg") }
-        } catch (e: Exception) {}
-    }
-
-    companion object {
-        private const val BROKER_HOST = "broker.hivemq.com"
-        private const val BROKER_PORT = 1883
-        private const val KEEPALIVE_S = 45
-        private const val TOPIC_PREFIX = "cc/"
-    }
-
-    private var socket: Socket? = null
+    @Volatile private var socket: Socket? = null
     private var input: DataInputStream? = null
     private var output: DataOutputStream? = null
     private val writeLock = Any()
+
     @Volatile private var running = false
     @Volatile private var connected = false
-    private var packetId: Int = 1
+    private var packetId = 1
+    private var supervisor: Thread? = null
+    private var pinger: Thread? = null
 
-    private var clientId: String = ""
-    private var topic: String = ""
-    private var sessionKey: ByteArray? = null
-    private var passphrase: String = ""
-    private var customHost: String = BROKER_HOST
-    private var customPort: Int = BROKER_PORT
+    private var clientId = ""
+    private var topic = ""
+    @Volatile private var sessionKey: ByteArray? = null
+    @Volatile private var nestedSession: NestedCipher.Session? = null
+    private var passphrase = ""
+    @Volatile private var customHost = BROKER_HOST
+    @Volatile private var customPort = BROKER_PORT
+
+    private val seenAnns = ConcurrentHashMap<String, Long>()
 
     var listener: CellularListener? = null
-
-    fun setCustomBroker(host: String, port: Int = 1883) {
-        customHost = host
-        customPort = port
-    }
 
     interface CellularListener {
         fun onConnected(address: String)
@@ -69,195 +81,414 @@ class CellularTransport(
         fun onPeerJoined(peerId: String)
     }
 
+    private fun trace(msg: String) {
+        if (TRACE) Log.d(TAG, msg)
+    }
+
+    fun setCustomBroker(host: String, port: Int = 1883) {
+        customHost = host.ifBlank { BROKER_HOST }
+        customPort = if (port in 1..65535) port else BROKER_PORT
+    }
+
     fun setPassphrase(passphrase: String) {
         this.passphrase = passphrase
-        val sid = CryptoUtils.sha256(("cc-session:" + passphrase).toByteArray())
-        val sessionId = sid.copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
+        val sessionId = CryptoUtils.sha256(("cc-session:" + passphrase).toByteArray())
+            .copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
         this.topic = TOPIC_PREFIX + sessionId
+        this.sessionKey = deriveSessionKey(passphrase)
+        this.nestedSession = NestedCipher.derive(passphrase)
+    }
+
+    private fun deriveSessionKey(passphrase: String): ByteArray {
         val salt = CryptoUtils.sha256(("cc-salt:" + passphrase).toByteArray())
-        this.sessionKey = CryptoUtils.hkdf(passphrase.toByteArray(), salt, "CovertComm-Cell-v2".toByteArray(), 32)
+        return try {
+            val spec = PBEKeySpec(passphrase.toCharArray(), salt, PBKDF2_ITERATIONS, 256)
+            val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+            val key = factory.generateSecret(spec).encoded
+            spec.clearPassword()
+            key
+        } catch (e: Exception) {
+            CryptoUtils.hkdf(passphrase.toByteArray(), salt, "CovertComm-Cell-v2".toByteArray(), 32)
+        }
     }
 
     fun init(): Boolean {
-        if (passphrase.isEmpty()) return false
+        if (passphrase.isEmpty() || sessionKey == null || topic.isEmpty()) return false
         clientId = "cc_" + identityManager.getShortFingerprint().take(10)
-        running = true
         return true
     }
 
     fun start() {
-        trace("start() running=$running topicEmpty=${topic.isEmpty()}")
-        if (!running || topic.isEmpty()) { listener?.onJoinFailed("Set passphrase first"); return }
-        Thread {
+        if (sessionKey == null || topic.isEmpty()) {
+            listener?.onJoinFailed("Set passphrase first")
+            return
+        }
+        if (running) return
+        running = true
+        supervisor = Thread({ supervise() }, "cellular-supervisor").also {
+            it.isDaemon = true
+            it.start()
+        }
+    }
+
+    private fun supervise() {
+        var attempt = 0
+        while (running) {
             try {
-                trace("connecting to $customHost:$customPort topic=$topic")
-                connectToBroker()
+                connectAndSubscribe()
                 connected = true
+                attempt = 0
                 listener?.onConnected(customHost)
                 listener?.onJoined(topic.removePrefix(TOPIC_PREFIX))
-                Thread.sleep(500)
+                startPinger()
+                try { Thread.sleep(300) } catch (_: InterruptedException) {}
                 sendAnnounce()
                 readLoop()
             } catch (e: Exception) {
-                trace("start error: ${e.message}")
-                listener?.onTransportError("Cellular link lost: ${e.message}")
-                connected = false
-                listener?.onDisconnected()
+                trace("connection failed: ${e.message}")
+                if (running && !connected) {
+                    listener?.onTransportError("Cellular link error: ${e.message}")
+                }
             }
-        }.start()
+            stopPinger()
+            val wasConnected = connected
+            connected = false
+            closeSocket()
+            if (wasConnected) listener?.onDisconnected()
+            if (!running) break
+            attempt = (attempt + 1).coerceAtMost(6)
+            val backoff = (1L shl attempt) * 500L
+            trace("reconnect in ${backoff}ms")
+            try { Thread.sleep(backoff) } catch (_: InterruptedException) { break }
+        }
     }
 
-    fun sendData(data: ByteArray) {
-        trace("sendData size=${data.size} connected=$connected")
-        if (sessionKey == null) { listener?.onTransportError("Set passphrase first"); return }
-        if (!connected) { listener?.onTransportError("Not connected"); return }
-        val key = sessionKey ?: return
-        val aad = CryptoUtils.sha256(("cc-aad:" + passphrase).toByteArray())
-        val ep = CryptoUtils.encryptAESGCM(key, data, aad)
-        val ct = ep.toCombined()
-        trace("sending ${data.size} -> ${ct.size} bytes")
-        publish(ct)
-        SecurityGuard.wipeMemory(ep.nonce); SecurityGuard.wipeMemory(ep.ciphertext); SecurityGuard.wipeMemory(ct)
+    private fun connectAndSubscribe() {
+        val s = Socket()
+        s.tcpNoDelay = true
+        s.connect(InetSocketAddress(customHost, customPort), CONNECT_TIMEOUT_MS)
+        s.soTimeout = 0
+        socket = s
+        input = DataInputStream(s.getInputStream().buffered())
+        output = DataOutputStream(s.getOutputStream().buffered())
+
+        sendConnect()
+        readConnack()
+        sendSubscribe()
+        readSuback()
     }
 
-    fun sendData(targetFP: ByteArray, data: ByteArray) { sendData(data) }
+    private fun sendConnect() {
+        val id = clientId.toByteArray(Charsets.UTF_8)
+        val body = ByteArray(12 + id.size)
+        var i = 0
+        body[i++] = 0x00
+        body[i++] = 0x04
+        body[i++] = 'M'.code.toByte()
+        body[i++] = 'Q'.code.toByte()
+        body[i++] = 'T'.code.toByte()
+        body[i++] = 'T'.code.toByte()
+        body[i++] = 0x04                                    // protocol level 3.1.1
+        body[i++] = 0x02                                    // clean session
+        body[i++] = ((KEEPALIVE_S shr 8) and 0xFF).toByte()
+        body[i++] = (KEEPALIVE_S and 0xFF).toByte()
+        body[i++] = ((id.size shr 8) and 0xFF).toByte()
+        body[i++] = (id.size and 0xFF).toByte()
+        System.arraycopy(id, 0, body, i, id.size)
 
-    private fun sendAnnounce() {
-        val msg = "ANN::${clientId}"
-        val key = sessionKey ?: return
-        val aad = CryptoUtils.sha256(("cc-aad:" + passphrase).toByteArray())
-        val ep = CryptoUtils.encryptAESGCM(key, msg.toByteArray(), aad)
-        publish(ep.toCombined())
-        SecurityGuard.wipeMemory(ep.nonce); SecurityGuard.wipeMemory(ep.ciphertext)
+        synchronized(writeLock) {
+            writeAll(byteArrayOf(0x10) + encodeRemainingLength(body.size))
+            writeAll(body)
+            output?.flush()
+        }
     }
 
-    private fun publish(payload: ByteArray) {
-        try {
-            trace("publish ${payload.size}b to $topic")
-            packetId++
-            if (packetId > 65535) packetId = 1
-            synchronized(writeLock) {
-                val tb = topic.toByteArray()
-                val body = byteArrayOf((tb.size shr 8).toByte(), (tb.size and 0xFF).toByte()) + tb + byteArrayOf((packetId shr 8).toByte(), packetId.toByte()) + payload
-                writeAll(byteArrayOf(0x32.toByte()) + encodeRemainingLength(body.size))
-                writeAll(body)
-                output?.flush()
-            }
-        } catch (e: Exception) { trace("publish error: ${e.message}") }
+    private fun readConnack() {
+        val b0 = input!!.readUnsignedByte()
+        if (b0 != 0x20) throw IOException("Expected CONNACK, got 0x%02x".format(b0))
+        val len = readRemainingLength()
+        if (len != 2) throw IOException("Bad CONNACK length $len")
+        input!!.readUnsignedByte()                          // session present flag
+        val rc = input!!.readUnsignedByte()
+        if (rc != 0) throw IOException("Broker refused connection (code $rc)")
+    }
+
+    private fun sendSubscribe() {
+        val tb = topic.toByteArray(Charsets.UTF_8)
+        val body = ByteArray(2 + 2 + tb.size + 1)
+        var i = 0
+        body[i++] = 0x00
+        body[i++] = 0x01                                    // packet id 1
+        body[i++] = ((tb.size shr 8) and 0xFF).toByte()
+        body[i++] = (tb.size and 0xFF).toByte()
+        System.arraycopy(tb, 0, body, i, tb.size)
+        i += tb.size
+        body[i] = 0x01                                      // requested QoS 1
+
+        synchronized(writeLock) {
+            writeAll(byteArrayOf(0x82.toByte()) + encodeRemainingLength(body.size))
+            writeAll(body)
+            output?.flush()
+        }
+    }
+
+    private fun readSuback() {
+        val b0 = input!!.readUnsignedByte()
+        if ((b0 and 0xF0) != 0x90) throw IOException("Expected SUBACK, got 0x%02x".format(b0))
+        val len = readRemainingLength()
+        if (len < 3) throw IOException("Bad SUBACK length $len")
+        input!!.readUnsignedShort()                         // packet id
+        val granted = input!!.readUnsignedByte()            // first return code
+        if (len > 3) skipFully(len - 3)
+        if (granted == 0x80) throw IOException("Subscription rejected by broker")
     }
 
     private fun readLoop() {
-        trace("readLoop begin")
-        try {
-            while (running && connected) {
-                val header = input?.read() ?: break
-                val type = (header shr 4) and 0xFF
-                val remaining = readRemainingLength()
-                if (remaining < 0 || remaining > 65536) break
-                when (type) {
-                    3 -> {
-                        val len = readShort()
-                        if (len <= 0 || len + 2 > remaining) { input?.skipBytes(remaining); continue }
-                        input?.skipBytes(len)
-                        val payloadLen = remaining - 2 - len
-                        if (payloadLen > 0) {
-                            val payload = ByteArray(payloadLen)
-                            readFully(payload)
-                            handleIncoming(payload)
-                        }
-                    }
-                    4 -> { input?.skipBytes(remaining) }
-                    13 -> {}
-                    9 -> { input?.skipBytes(remaining) }
-                    else -> { input?.skipBytes(remaining) }
-                }
+        val ins = input ?: return
+        while (running && connected) {
+            val header = ins.read()
+            if (header < 0) break
+            val type = (header shr 4) and 0x0F
+            val flags = header and 0x0F
+            val remaining = readRemainingLength()
+            if (remaining < 0) break
+            when (type) {
+                PKT_PUBLISH -> handlePublish(flags, remaining)
+                else -> skipFully(remaining)                // PUBACK / SUBACK / PINGRESP / CONNACK
             }
-        } catch (e: Exception) { trace("readLoop error: ${e.message}") }
-        if (running) { connected = false; listener?.onDisconnected() }
-        trace("readLoop end")
+        }
     }
 
-    private val seenAnns = ConcurrentHashMap<String, Boolean>()
+    private fun handlePublish(flags: Int, remaining: Int) {
+        val ins = input ?: return
+        if (remaining < 2) { skipFully(remaining); return }
+
+        val topicLen = ins.readUnsignedShort()
+        if (topicLen + 2 > remaining) { skipFully(remaining - 2); return }
+        skipFully(topicLen)
+
+        val qos = (flags shr 1) and 0x03
+        var pid = 0
+        if (qos > 0) {
+            if (remaining < topicLen + 4) { skipFully(remaining - 2 - topicLen); return }
+            pid = ins.readUnsignedShort()
+        }
+
+        val consumed = 2 + topicLen + (if (qos > 0) 2 else 0)
+        val payloadLen = remaining - consumed
+        if (payloadLen < 0) return
+
+        val payload = ByteArray(payloadLen)
+        ins.readFully(payload)
+
+        if (qos == 1 && pid > 0) sendPuback(pid)
+        handleIncoming(payload)
+    }
 
     private fun handleIncoming(payload: ByteArray) {
         val key = sessionKey ?: return
         val aad = CryptoUtils.sha256(("cc-aad:" + passphrase).toByteArray())
-        trace("incoming ${payload.size}b")
-        val plain = try { CryptoUtils.decryptAESGCM(key, payload, aad) } catch (e: Exception) { trace("decrypt fail: ${e.message}"); null }
-        if (plain != null) {
+        val unwrapped = nestedSession?.let { NestedCipher.decrypt(it, payload) } ?: payload
+        val plain = try {
+            CryptoUtils.decryptAESGCM(key, unwrapped, aad)
+        } catch (e: Exception) {
+            trace("decrypt fail: ${e.message}")
+            null
+        } ?: return
+
+        try {
             val text = String(plain, Charsets.UTF_8)
             if (text.startsWith("ANN::")) {
                 val peerId = text.removePrefix("ANN::")
-                if (peerId != clientId && seenAnns.putIfAbsent(peerId, true) == null) {
-                    listener?.onPeerJoined(peerId)
-                    Thread { Thread.sleep(500); sendAnnounce() }.start()
+                if (peerId != clientId) {
+                    val now = System.currentTimeMillis()
+                    val prev = seenAnns[peerId]
+                    if (prev == null || now - prev > 60_000) {
+                        seenAnns[peerId] = now
+                        listener?.onPeerJoined(peerId)
+                        // Answer once so the peer learns about us, then stay quiet.
+                        Thread {
+                            try { Thread.sleep(300) } catch (_: InterruptedException) {}
+                            sendAnnounce()
+                        }.start()
+                    }
                 }
             } else {
                 listener?.onMessageReceived(plain.copyOf(), ByteArray(2))
             }
+        } finally {
             SecurityGuard.wipeMemory(plain)
         }
     }
 
-    private fun readShort(): Int {
-        val h = input?.read() ?: return 0; val l = input?.read() ?: return 0
-        return (h shl 8) or l
+    fun sendData(data: ByteArray) {
+        val key = sessionKey
+        if (key == null) { listener?.onTransportError("Set passphrase first"); return }
+        if (!connected) { listener?.onTransportError("Not connected"); return }
+        val aad = CryptoUtils.sha256(("cc-aad:" + passphrase).toByteArray())
+        val ep = CryptoUtils.encryptAESGCM(key, data, aad)
+        var ct = ep.toCombined()
+        // Extra layered pass (Feistel + XOR + AES-GCM) as documented for the
+        // cellular path.
+        nestedSession?.let { ct = NestedCipher.encrypt(it, ct) }
+        publish(ct)
+        SecurityGuard.wipeMemory(ep.nonce)
+        SecurityGuard.wipeMemory(ep.ciphertext)
+        SecurityGuard.wipeMemory(ct)
+    }
+
+    fun sendData(targetFP: ByteArray, data: ByteArray) = sendData(data)
+
+    private fun sendAnnounce() {
+        val key = sessionKey ?: return
+        val aad = CryptoUtils.sha256(("cc-aad:" + passphrase).toByteArray())
+        val ep = CryptoUtils.encryptAESGCM(key, "ANN::$clientId".toByteArray(Charsets.UTF_8), aad)
+        var ct = ep.toCombined()
+        nestedSession?.let { ct = NestedCipher.encrypt(it, ct) }
+        publish(ct)
+        SecurityGuard.wipeMemory(ep.nonce)
+        SecurityGuard.wipeMemory(ep.ciphertext)
+        SecurityGuard.wipeMemory(ct)
+    }
+
+    private fun publish(payload: ByteArray) {
+        if (!connected) { trace("publish skipped, not connected"); return }
+        try {
+            val tb = topic.toByteArray(Charsets.UTF_8)
+            synchronized(writeLock) {
+                val pid = nextPacketIdLocked()
+                val body = ByteArray(2 + tb.size + 2 + payload.size)
+                var i = 0
+                body[i++] = ((tb.size shr 8) and 0xFF).toByte()
+                body[i++] = (tb.size and 0xFF).toByte()
+                System.arraycopy(tb, 0, body, i, tb.size)
+                i += tb.size
+                body[i++] = ((pid shr 8) and 0xFF).toByte()
+                body[i++] = (pid and 0xFF).toByte()
+                System.arraycopy(payload, 0, body, i, payload.size)
+
+                writeAll(byteArrayOf(0x32.toByte()) + encodeRemainingLength(body.size))
+                writeAll(body)
+                output?.flush()
+            }
+        } catch (e: Exception) {
+            trace("publish error: ${e.message}")
+        }
+    }
+
+    private fun nextPacketIdLocked(): Int {
+        packetId++
+        if (packetId > 65535) packetId = 1
+        return packetId
+    }
+
+    private fun sendPuback(pid: Int) {
+        try {
+            synchronized(writeLock) {
+                writeAll(
+                    byteArrayOf(
+                        0x40,
+                        0x02,
+                        ((pid shr 8) and 0xFF).toByte(),
+                        (pid and 0xFF).toByte()
+                    )
+                )
+                output?.flush()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun sendPingReq() {
+        synchronized(writeLock) {
+            writeAll(byteArrayOf(0xC0.toByte(), 0x00))
+            output?.flush()
+        }
+    }
+
+    private fun startPinger() {
+        stopPinger()
+        pinger = Thread({
+            while (running && connected) {
+                try { Thread.sleep(KEEPALIVE_S * 1000L / 2) } catch (_: InterruptedException) { return@Thread }
+                if (!running || !connected) return@Thread
+                try { sendPingReq() } catch (_: Exception) { return@Thread }
+            }
+        }, "cellular-pinger").also {
+            it.isDaemon = true
+            it.start()
+        }
+    }
+
+    private fun stopPinger() {
+        pinger?.interrupt()
+        pinger = null
     }
 
     private fun readRemainingLength(): Int {
-        var m = 1; var v = 0; var c = 0
+        val ins = input ?: return -1
+        var multiplier = 1
+        var value = 0
+        var bytes = 0
         while (true) {
-            val b = input?.read() ?: return -1
-            v += (b and 0x7F) * m
+            val b = ins.read()
+            if (b < 0) return -1
+            value += (b and 0x7F) * multiplier
             if ((b and 0x80) == 0) break
-            m *= 128; c++
-            if (c > 4) return -1
+            multiplier *= 128
+            bytes++
+            if (bytes > 3 || value > MAX_REMAINING) return -1
         }
-        return v
+        return value
     }
 
     private fun encodeRemainingLength(l: Int): ByteArray {
         val out = java.io.ByteArrayOutputStream()
         var x = l
-        while (true) { var d = x % 128; x /= 128; if (x > 0) d = d or 0x80; out.write(d); if (x <= 0) break }
+        while (true) {
+            var d = x % 128
+            x /= 128
+            if (x > 0) d = d or 0x80
+            out.write(d)
+            if (x <= 0) break
+        }
         return out.toByteArray()
     }
 
-    private fun readFully(b: ByteArray) {
-        var off = 0
-        while (off < b.size) { val n = input?.read(b, off, b.size - off) ?: break; if (n <= 0) break; off += n }
+    private fun skipFully(n: Int) {
+        if (n <= 0) return
+        val ins = input ?: return
+        val buf = ByteArray(256)
+        var left = n
+        while (left > 0) {
+            val chunk = minOf(left, buf.size)
+            val read = ins.read(buf, 0, chunk)
+            if (read < 0) throw EOFException()
+            left -= read
+        }
     }
 
-    private fun writeAll(b: ByteArray) { output?.write(b) }
+    private fun writeAll(b: ByteArray) {
+        output?.write(b)
+    }
 
-    private fun connectToBroker() {
-        trace("TCP connect $customHost:$customPort")
-        socket = Socket(customHost, customPort)
-        socket?.tcpNoDelay = true
-        socket?.soTimeout = 0
-        input = DataInputStream(socket?.getInputStream())
-        output = DataOutputStream(socket?.getOutputStream())
-
-        val id = clientId.toByteArray()
-        val pkt = byteArrayOf(0, 4, 'M'.code.toByte(), 'Q'.code.toByte(), 'T'.code.toByte(), 'T'.code.toByte()) +
-                byteArrayOf(0x04, 0x02) + byteArrayOf((KEEPALIVE_S shr 8).toByte(), KEEPALIVE_S.toByte()) +
-                byteArrayOf((id.size shr 8).toByte(), (id.size and 0xFF).toByte()) + id
-        synchronized(writeLock) { writeAll(byteArrayOf(0x10) + encodeRemainingLength(pkt.size)); writeAll(pkt); output?.flush() }
-
-        input?.read()
-        readRemainingLength()
-        input?.skipBytes(2)
-        trace("CONNACK OK")
-
-        val tb = topic.toByteArray()
-        val sub = byteArrayOf(0x00, 0x01) + byteArrayOf((tb.size shr 8).toByte(), (tb.size and 0xFF).toByte()) + tb + byteArrayOf(0x01)
-        synchronized(writeLock) { writeAll(byteArrayOf(0x82.toByte()) + encodeRemainingLength(sub.size)); writeAll(sub); output?.flush() }
-        trace("SUBSCRIBED to $topic")
+    private fun closeSocket() {
+        try { socket?.close() } catch (_: Exception) {}
+        socket = null
+        input = null
+        output = null
     }
 
     fun close() {
-        running = false; connected = false
-        try { socket?.close() } catch (_: Exception) {}
-        socket = null; sessionKey?.let { CryptoUtils.wipe(it) }; sessionKey = null
+        running = false
+        connected = false
+        stopPinger()
+        closeSocket()
+        supervisor?.interrupt()
+        supervisor = null
+        sessionKey?.let { CryptoUtils.wipe(it) }
+        sessionKey = null
+        nestedSession?.wipe()
+        nestedSession = null
+        seenAnns.clear()
     }
 }

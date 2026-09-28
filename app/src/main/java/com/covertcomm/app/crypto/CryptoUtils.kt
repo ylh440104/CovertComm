@@ -146,6 +146,13 @@ object CryptoUtils {
         return MessageDigest.getInstance("SHA-256").digest(data)
     }
 
+    fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        val k = if (key.isEmpty()) ByteArray(1) else key
+        mac.init(SecretKeySpec(k, "HmacSHA256"))
+        return mac.doFinal(data)
+    }
+
     fun wipe(data: ByteArray) {
         java.util.Arrays.fill(data, 0)
     }

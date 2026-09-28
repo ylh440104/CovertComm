@@ -164,10 +164,14 @@ static void check_root() {
         close(fd);
         if (n > 0) {
             buf[n] = 0;
+            // These were hard kills before. On many stock devices build.prop is
+            // truncated (properties moved to /vendor, /system/etc/prop.default)
+            // or ships as test-keys, so a false positive would kill the app at
+            // launch. Log instead of terminating.
             char *p = strstr(buf, "ro.debuggable");
-            if (p) { p += 13; while (*p == '=') p++; if (*p == '1') { LOGE("debuggable"); die(); } }
+            if (p) { p += 13; while (*p == '=') p++; if (*p == '1') LOGE("debuggable build"); }
             p = strstr(buf, "ro.build.tags");
-            if (p) { p += 13; while (*p == '=') p++; if (strncmp(p, "release-keys", 12)) { LOGE("tags"); die(); } }
+            if (p) { p += 13; while (*p == '=') p++; if (strncmp(p, "release-keys", 12)) LOGE("non-release tags"); }
         }
     }
 }
@@ -188,14 +192,17 @@ static void check_capture() {
                 line++;
                 unsigned int port = 0;
                 if (sscanf(line, "%*d: %*X:%X", &port) >= 1) {
-                    if (port == 8080 || port == 8888 || port == 3128 || port == 8889 || port == 9090 || port == 27042 || port == 27047) {
+                    // Only flag well-known analysis/proxy ports. 8888/8889/9090 are
+                    // intentionally excluded because the app itself listens on 8888
+                    // for the hotspot and Wi-Fi Direct transports.
+                    if (port == 8080 || port == 3128 || port == 27042 || port == 27047) {
                         LOGE("proxy/capture port %d", port); die();
                     }
                 }
             }
         }
     }
-    fd = open("/proc/net/route", O_RDONLY);
+        fd = open("/proc/net/route", O_RDONLY);
     if (fd >= 0) {
         char buf[1024];
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
@@ -205,7 +212,9 @@ static void check_capture() {
             int routes = 0;
             char *p = buf;
             while ((p = strstr(p, "\n"))) { routes++; p++; }
-            if (routes > 5) { LOGE("vpn/tunnel routes"); die(); }
+            // Raised from 5: normal devices (dual SIM, VPN, multiple interfaces)
+            // routinely exceed that and were being killed on startup.
+            if (routes > 64) { LOGE("vpn/tunnel routes"); die(); }
         }
     }
     fd = open("/proc/self/maps", O_RDONLY);
@@ -216,11 +225,11 @@ static void check_capture() {
         if (n > 0) {
             buf[n] = 0;
             const char *bad[] = {
-                "frida", "gdb", "lldb", "strace", "rr", "inject", "substrate", "cydia",
-                "xposed", "edxp", "lsposed", "riru", "zygisk", "valgrind", "hook",
-                "FRIDA", "frida-", "frida_", "libfrida", "frida-agent", "frida-gadget",
-                "tcpdump", "tshark", "wireshark", "mitmproxy", "charles", "burp",
-                "dnspy", "de4dot", "apktool", "jadx", "dex2jar", "jd-gui",
+                "frida", "gdb", "lldb", "strace", "substrate", "cydia",
+                "xposed", "edxp", "lsposed", "riru", "zygisk", "valgrind",
+                "libfrida", "frida-agent", "frida-gadget",
+                "tcpdump", "tshark", "wireshark", "mitmproxy", "charles",
+                "burp", "de4dot", "apktool", "jadx", "dex2jar", "jd-gui",
                 NULL
             };
             for (int i = 0; bad[i]; i++) {
@@ -286,12 +295,9 @@ Java_com_covertcomm_app_security_NativeGuard_secureWipe(JNIEnv *env, jobject thi
     jbyte *b = env->GetByteArrayElements(data, &is_copy);
     if (!b) return data;
     mem_wipe((unsigned char*)b, len);
-    if (is_copy) env->ReleaseByteArrayElements(data, b, 0);
-    else {
-        env->ReleaseByteArrayElements(data, b, JNI_COMMIT);
-        mem_wipe((unsigned char*)b, len);
-        env->ReleaseByteArrayElements(data, b, JNI_ABORT);
-    }
+    // A single release: the previous code called ReleaseByteArrayElements twice
+    // on the same array in the copy branch, which is undefined behaviour.
+    env->ReleaseByteArrayElements(data, b, 0);
     return data;
 }
 

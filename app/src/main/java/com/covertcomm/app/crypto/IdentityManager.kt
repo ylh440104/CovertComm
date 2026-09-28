@@ -50,7 +50,7 @@ class IdentityManager(context: Context) {
         val pubKey = identityKeyPair?.publicKey ?: return "----"
         val hash = CryptoUtils.sha256(pubKey)
         val sb = StringBuilder()
-        for (i in 0 until 4) {
+        for (i in 0 until 8) {
             sb.append(String.format("%02X", hash[i]))
         }
         return sb.toString()

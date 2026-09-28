@@ -108,6 +108,8 @@ class MainActivity : ComponentActivity() {
     private var pendingPQDecapsulated: ByteArray? = null
 
     private var pendingOutgoing: String? = null
+    private var handshakeSent = false
+    private var pqExchanged = false
     private val messages = mutableStateListOf<ChatMessage>()
     private val statusConnected = mutableStateOf(false)
     private val statusText = mutableStateOf("Ready")
@@ -128,8 +130,15 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        if (result.values.all { it }) initBLE()
-        else messages.add(ChatMessage("[Permissions required]", false))
+        // Only the location/nearby permissions are essential for BLE discovery;
+        // a denied optional permission should not block transport setup entirely.
+        val locationGranted = result[Manifest.permission.ACCESS_FINE_LOCATION] != false &&
+                result[Manifest.permission.ACCESS_COARSE_LOCATION] != false
+        if (locationGranted) {
+            initBLE()
+        } else {
+            messages.add(ChatMessage("[Permissions required]", false))
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -148,8 +157,10 @@ class MainActivity : ComponentActivity() {
             }
         }
         requestPermissions()
+        // Window/FLAG_SECURE work must happen on the main thread; doing it in the
+        // background thread below could throw and abort transport initialisation.
+        SecurityGuard.apply(this)
         thread {
-            SecurityGuard.apply(this)
             identityManager = IdentityManager(this)
             ratchet = DoubleRatchet(identityManager)
             meshRouter = MeshRouter(getMyFP())
@@ -276,7 +287,7 @@ class MainActivity : ComponentActivity() {
         Surface(
             shape = RoundedCornerShape(18.dp),
             color = if (selected) Color(0x2AD4A574) else Color(0x14FFFFFF),
-            modifier = Modifier.fillMaxWidth().clickable { onClick() }
+            modifier = Modifier.fillMaxWidth().clickable { resetSession(); onClick() }
         ) {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 15.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(40.dp).background(if (selected) Color(0x33D4A574) else Color(0x1AFFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
@@ -386,7 +397,7 @@ class MainActivity : ComponentActivity() {
                         if (pass.isNotEmpty()) {
                             when (activeMode) {
                                 Mode.BLE_MESH -> { if (!bleInitialized) bleInitialized = bleTransport.init(meshRouter); if (bleInitialized) { bleTransport.setRendezvousPassphrase(pass); bleTransport.startRendezvous(); startCountdown(); passphraseInput.value = "" } else messages.add(ChatMessage("[Bluetooth off]", false)) }
-                                Mode.AWARE -> { wifiAwareTransport?.let { it.setPassphrase(pass); it.startPublish() }; messages.add(ChatMessage("[NAN publishing]", false)); passphraseInput.value = ""; startCountdown() }
+                                Mode.AWARE -> { wifiAwareTransport?.let { it.setPassphrase(pass); it.startSubscribe() }; messages.add(ChatMessage("[NAN subscribing]", false)); passphraseInput.value = ""; startCountdown() }
                                 Mode.CELLULAR -> { cellularTransport?.let { it.setPassphrase(pass); val ok = it.init(); if (ok) { it.start(); messages.add(ChatMessage("[Waiting on channel, share same passphrase with peer]", false)) } else { messages.add(ChatMessage("[Cellular init failed]", false)) } }; passphraseInput.value = "" }
                                 else -> {}
                             }
@@ -487,6 +498,19 @@ class MainActivity : ComponentActivity() {
         return if (fp.length >= 2) byteArrayOf((fp[0].code and 0xFF).toByte(), (fp[1].code and 0xFF).toByte()) else ByteArray(2)
     }
 
+    private fun resetSession() {
+        handshakeSent = false
+        pqExchanged = false
+        pendingHandshakeBundle = null
+        pendingPQEncapsulated?.let { CryptoUtils.wipe(it) }
+        pendingPQDecapsulated?.let { CryptoUtils.wipe(it) }
+        pendingPQEncapsulated = null
+        pendingPQDecapsulated = null
+        pendingOutgoing = null
+        if (::ratchet.isInitialized) ratchet.wipe()
+        com.covertcomm.app.mesh.MeshFrame.setMacKey(null)
+    }
+
     private fun startCountdown() {
         countdownTimer?.cancel(); countdownVisible.value = true
         countdownTimer = object : CountDownTimer(45000, 1000) {
@@ -496,12 +520,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendEncryptedMessage(text: String) {
-        if (activeMode == Mode.CELLULAR) {
-            val data = text.toByteArray(Charsets.UTF_8)
-            cellularTransport?.sendData(data)
-            messages.add(ChatMessage(text, true, burnAfterRead = burnAfterRead))
-            return
-        }
         if (!::ratchet.isInitialized || !ratchet.initialized) {
             pendingOutgoing = text
             messages.add(ChatMessage(text, true, burnAfterRead = burnAfterRead))
@@ -514,26 +532,29 @@ class MainActivity : ComponentActivity() {
         val rm = ratchet.encrypt(padded)
         val json = JSONObject()
         json.put("type", "msg"); json.put("dhPublicKey", rm.dhPublicKey); json.put("pnum", rm.previousMessageNumber); json.put("num", rm.messageNumber)
+        json.put("burn", burnAfterRead)
         json.put("nonce", Base64.encodeToString(rm.nonce, Base64.NO_WRAP)); json.put("ciphertext", Base64.encodeToString(rm.ciphertext, Base64.NO_WRAP))
         val data = json.toString().toByteArray()
-        when (activeMode) { Mode.HOTSPOT -> hotspotTransport.sendData(data); Mode.BLE_MESH -> bleTransport.sendData(ByteArray(2), data); Mode.LORA -> loraTransport?.sendData(ByteArray(2), data); Mode.AWARE -> wifiAwareTransport?.sendData(data); Mode.P2P -> wifiDirectTransport?.sendData(data); Mode.CELLULAR -> cellularTransport?.sendData(data); Mode.NONE -> {} }
+        sendControl(data)
         messages.add(ChatMessage(text, true, burnAfterRead = burnAfterRead))
-        CryptoUtils.wipe(plaintext); CryptoUtils.wipe(padded); SecurityGuard.wipeMemory(rm.nonce); SecurityGuard.wipeMemory(rm.ciphertext)
+        CryptoUtils.wipe(plaintext); CryptoUtils.wipe(padded)
     }
 
     private fun sendHandshake() {
         try {
             if (!::ratchet.isInitialized || !::identityManager.isInitialized) return
+            handshakeSent = true
             val json = JSONObject()
             json.put("type", "handshake")
             val keys = JSONObject()
             keys.put("identityKey", encodeKey(identityManager.identityKeyPair!!.publicKey))
-            keys.put("preKey", encodeKey(identityManager.currentDHKeyPair!!.publicKey))
-            keys.put("dhKey", encodeKey(identityManager.currentDHKeyPair!!.publicKey))
+            keys.put("preKey", identityManager.exportPreKeyPublic())
+            keys.put("dhKey", identityManager.exportDHPublicKey())
             keys.put("fingerprint", identityManager.getShortFingerprint())
+            keys.put("pqPublicKey", identityManager.exportPQPublicKey())
             json.put("keys", keys)
             val data = json.toString().toByteArray()
-            when (activeMode) { Mode.HOTSPOT -> hotspotTransport.sendData(data); Mode.BLE_MESH -> bleTransport.sendData(ByteArray(2), data); Mode.LORA -> loraTransport?.sendData(ByteArray(2), data); Mode.AWARE -> wifiAwareTransport?.sendData(data); Mode.P2P -> wifiDirectTransport?.sendData(data); else -> {} }
+            when (activeMode) { Mode.HOTSPOT -> hotspotTransport.sendData(data); Mode.BLE_MESH -> bleTransport.sendData(ByteArray(2), data); Mode.LORA -> loraTransport?.sendData(ByteArray(2), data); Mode.AWARE -> wifiAwareTransport?.sendData(data); Mode.P2P -> wifiDirectTransport?.sendData(data); Mode.CELLULAR -> cellularTransport?.sendData(data); else -> {} }
         } catch (e: Exception) {
             messages.add(ChatMessage("[Handshake failed]", false))
         }
@@ -549,36 +570,93 @@ class MainActivity : ComponentActivity() {
     private fun handleHandshake(json: JSONObject) {
         try {
             val k = json.getJSONObject("keys")
-            val bundle = X3DH.PreKeyBundle(k.getString("identityKey"), k.getString("preKey"), k.getString("dhKey"), k.optString("fingerprint"))
+            val bundle = X3DH.PreKeyBundle(
+                k.getString("identityKey"),
+                k.getString("preKey"),
+                k.getString("dhKey"),
+                k.optString("fingerprint")
+            )
+            pendingHandshakeBundle = bundle
+
+            // Make the exchange symmetric: whoever receives a handshake replies
+            // with its own (once) so both sides end up with the peer's bundle.
+            if (!handshakeSent) sendHandshake()
+
             val pqKey = k.optString("pqPublicKey", "")
-            if (pqKey.isNotEmpty()) {
-                val enc = PostQuantumKEM.encapsulate(PostQuantumKEM.decodePublicKey(pqKey))
-                pendingPQEncapsulated = enc.sharedSecret; pendingHandshakeBundle = bundle
-                messages.add(ChatMessage("[PQ exchange]", false))
-                val pj = JSONObject(); pj.put("type", "pq_exchange"); pj.put("ciphertext", Base64.encodeToString(enc.ciphertext, Base64.NO_WRAP))
-                val pd = pj.toString().toByteArray()
-                when (activeMode) { Mode.HOTSPOT -> hotspotTransport.sendData(pd); Mode.BLE_MESH -> bleTransport.sendData(ByteArray(2), pd); Mode.LORA -> loraTransport?.sendData(ByteArray(2), pd); Mode.AWARE -> wifiAwareTransport?.sendData(pd); Mode.P2P -> wifiDirectTransport?.sendData(pd); Mode.CELLULAR -> cellularTransport?.sendData(pd); Mode.NONE -> {} }
+            if (pqKey.isNotEmpty() && identityManager.pqKeyPair != null) {
+                if (!pqExchanged) {
+                    pqExchanged = true
+                    val enc = PostQuantumKEM.encapsulate(PostQuantumKEM.decodePublicKey(pqKey))
+                    pendingPQEncapsulated = enc.sharedSecret
+                    messages.add(ChatMessage("[PQ exchange]", false))
+                    val pj = JSONObject()
+                    pj.put("type", "pq_exchange")
+                    pj.put("ciphertext", Base64.encodeToString(enc.ciphertext, Base64.NO_WRAP))
+                    sendControl(pj.toString().toByteArray())
+                }
                 tryInitRatchetWithPQ()
             } else {
-                ratchet.initializeAsInitiator(X3DH.initiate(identityManager.identityKeyPair!!.privateKey, identityManager.currentDHKeyPair!!.privateKey, bundle))
-                finishHandshakeUI(bundle)
+                // Either side without a post-quantum key falls back to classical X3DH.
+                initRatchet(bundle)
             }
-        } catch (e: Exception) { messages.add(ChatMessage("[Handshake failed]", false)) }
+        } catch (e: Exception) {
+            messages.add(ChatMessage("[Handshake failed]", false))
+        }
     }
 
     private fun handlePQExchange(json: JSONObject) {
-        try { pendingPQDecapsulated = identityManager.decapsulatePQ(Base64.decode(json.getString("ciphertext"), Base64.NO_WRAP)); tryInitRatchetWithPQ() } catch (_: Exception) {}
+        try {
+            pendingPQDecapsulated = identityManager.decapsulatePQ(Base64.decode(json.getString("ciphertext"), Base64.NO_WRAP))
+            tryInitRatchetWithPQ()
+        } catch (_: Exception) {}
     }
 
     private fun tryInitRatchetWithPQ() {
-        val b = pendingHandshakeBundle ?: return; val enc = pendingPQEncapsulated ?: return; val dec = pendingPQDecapsulated ?: return
-        ratchet.initializeAsInitiator(X3DH.initiate(identityManager.identityKeyPair!!.privateKey, identityManager.currentDHKeyPair!!.privateKey, b, enc.copyOf(), dec.copyOf()))
-        finishHandshakeUI(b); CryptoUtils.wipe(enc); CryptoUtils.wipe(dec); pendingHandshakeBundle = null; pendingPQEncapsulated = null; pendingPQDecapsulated = null
+        val bundle = pendingHandshakeBundle ?: return
+        val enc = pendingPQEncapsulated ?: return
+        val dec = pendingPQDecapsulated ?: return
+        pendingHandshakeBundle = null
+        pendingPQEncapsulated = null
+        pendingPQDecapsulated = null
+        initRatchet(bundle, enc.copyOf(), dec.copyOf())
+        CryptoUtils.wipe(enc)
+        CryptoUtils.wipe(dec)
+    }
+
+    private fun initRatchet(bundle: X3DH.PreKeyBundle, pqEncapsulated: ByteArray? = null, pqDecapsulated: ByteArray? = null) {
+        // Guard against a concurrent or repeated handshake re-initialising a
+        // live session, which would reset the ratchet counters and break it.
+        if (::ratchet.isInitialized && ratchet.initialized) return
+        val result = X3DH.initiate(
+            identityManager.preKeyPair!!.privateKey,
+            identityManager.currentDHKeyPair!!.privateKey,
+            bundle,
+            pqEncapsulated,
+            pqDecapsulated
+        )
+        ratchet.initialize(result)
+        // Derive a separate MAC key (don't reuse the ratchet chain key) so both
+        // peers can authenticate mesh frames with a domain-separated key.
+        val macKey = CryptoUtils.hkdf(result.chainKey, info = "mesh_mac_key".toByteArray())
+        com.covertcomm.app.mesh.MeshFrame.setMacKey(macKey)
+        CryptoUtils.wipe(macKey)
+        finishHandshakeUI(bundle)
+    }
+
+    private fun sendControl(data: ByteArray) {
+        when (activeMode) {
+            Mode.HOTSPOT -> hotspotTransport.sendData(data)
+            Mode.BLE_MESH -> bleTransport.sendData(ByteArray(2), data)
+            Mode.LORA -> loraTransport?.sendData(ByteArray(2), data)
+            Mode.AWARE -> wifiAwareTransport?.sendData(data)
+            Mode.P2P -> wifiDirectTransport?.sendData(data)
+            Mode.CELLULAR -> cellularTransport?.sendData(data)
+            Mode.NONE -> {}
+        }
     }
 
     private fun finishHandshakeUI(bundle: X3DH.PreKeyBundle) {
         val sn = identityManager.getSafetyNumber(bundle.identityKey)
-        messages.add(ChatMessage("[PQ OK \u00b7 ML-KEM]", false))
         messages.add(ChatMessage("[Session established]", false))
         messages.add(ChatMessage("[SN: $sn]", false))
         flushPendingOutgoing()
@@ -596,9 +674,17 @@ class MainActivity : ComponentActivity() {
         try {
             val rm = DoubleRatchet.RatchetMessage(json.getString("dhPublicKey"), json.getInt("pnum"), json.getInt("num"), Base64.decode(json.getString("nonce"), Base64.NO_WRAP), Base64.decode(json.getString("ciphertext"), Base64.NO_WRAP))
             val padded = ratchet.decrypt(rm); val pt = CryptoUtils.unpadWithLengthPrefix(padded); val text = String(pt, Charsets.UTF_8)
-            messages.add(ChatMessage(text, false, burnAfterRead = burnAfterRead))
-            if (burnAfterRead) { burnCountdownTimer?.cancel(); burnCountdownTimer = object : CountDownTimer(5000, 1000) { override fun onTick(m: Long) {} override fun onFinish() { if (messages.isNotEmpty()) messages.removeAt(messages.size - 1) } }.start() }
-            CryptoUtils.wipe(padded); CryptoUtils.wipe(pt); SecurityGuard.wipeMemory(rm.nonce); SecurityGuard.wipeMemory(rm.ciphertext)
+            val burn = json.optBoolean("burn", false)
+            messages.add(ChatMessage(text, false, burnAfterRead = burn))
+            if (burn) {
+                val index = messages.size - 1
+                burnCountdownTimer?.cancel()
+                burnCountdownTimer = object : CountDownTimer(5000, 1000) {
+                    override fun onTick(m: Long) {}
+                    override fun onFinish() { if (index in messages.indices) messages.removeAt(index) }
+                }.start()
+            }
+            CryptoUtils.wipe(padded); CryptoUtils.wipe(pt)
         } catch (_: Exception) { messages.add(ChatMessage("[Decrypt failed]", false)) }
     }
 
@@ -642,7 +728,7 @@ class MainActivity : ComponentActivity() {
         override fun onHandshakeSent() { runOnUiThread { messages.add(ChatMessage("[NAN HS sent]", false)) } }
         override fun onDiscoveryStarted() { runOnUiThread { messages.add(ChatMessage("[NAN discovery]", false)) } }
         override fun onDiscoveryFailed(reason: String) { runOnUiThread { messages.add(ChatMessage("[NAN failed]", false)); statusText.value = "Idle"; statusConnected.value = false; countdownVisible.value = false; countdownTimer?.cancel() } }
-        override fun onPeerDiscovered(peerId: String) { runOnUiThread { messages.add(ChatMessage("[NAN peer found]", false)) } }
+        override fun onPeerDiscovered(peerId: String) { runOnUiThread { messages.add(ChatMessage("[NAN peer found]", false)); if (!handshakeSent) sendHandshake() } }
     }
 
     private val p2pListener = object : WifiDirectTransport.WifiDirectListener {
@@ -660,16 +746,12 @@ class MainActivity : ComponentActivity() {
     private val cellularListener = object : CellularTransport.CellularListener {
         override fun onConnected(address: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[Cellular: $address]", false)) } }
         override fun onDisconnected() { runOnUiThread { statusText.value = "Lost"; statusConnected.value = false; if (::ratchet.isInitialized) ratchet.wipe(); messages.add(ChatMessage("[Cellular lost]", false)) } }
-        override fun onMessageReceived(data: ByteArray, senderFP: ByteArray) { runOnUiThread {
-                        Log.i("MainActivity", "onMessageReceived size=${data.size}")
-                        val text = String(data, Charsets.UTF_8)
-                        messages.add(ChatMessage(text, false, burnAfterRead = burnAfterRead))
-                    } }
+        override fun onMessageReceived(data: ByteArray, senderFP: ByteArray) { runOnUiThread { handleIncomingMessage(data) } }
         override fun onTransportError(error: String) { runOnUiThread { messages.add(ChatMessage("[$error]", false)) } }
         override fun onHandshakeSent() { runOnUiThread { messages.add(ChatMessage("[Cellular HS sent]", false)) } }
         override fun onJoined(sessionId: String) { runOnUiThread { messages.add(ChatMessage("[Joined channel, waiting for peer...]", false)) } }
         override fun onJoinFailed(reason: String) { runOnUiThread { messages.add(ChatMessage("[Join failed: $reason]", false)) } }
-        override fun onPeerJoined(peerId: String) { runOnUiThread { messages.add(ChatMessage("[有人加入了频道: $peerId]", false)) } }
+        override fun onPeerJoined(peerId: String) { runOnUiThread { messages.add(ChatMessage("[Peer joined: $peerId]", false)); if (!handshakeSent) sendHandshake() } }
     }
     private val meshRouterListener = object : MeshRouter.RouterListener {
         override fun onFrameReady(f: ByteArray, n: ByteArray?) { when (activeMode) { Mode.BLE_MESH -> bleTransport.sendData(ByteArray(2), f); Mode.LORA -> loraTransport?.sendData(ByteArray(2), f); Mode.AWARE -> wifiAwareTransport?.sendData(f); Mode.P2P -> wifiDirectTransport?.sendData(f); Mode.CELLULAR -> cellularTransport?.sendData(f); else -> {} } }
@@ -680,6 +762,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() { super.onResume(); SecurityGuard.onAppForegrounded(this); if (!SecurityGuard.verify(this)) SecurityGuard.apply(this) }
     override fun onPause() { super.onPause(); SecurityGuard.onAppBackgrounded(this) }
-    override fun onStop() { super.onStop(); messages.clear(); countdownTimer?.cancel(); burnCountdownTimer?.cancel(); pendingPQEncapsulated?.let { CryptoUtils.wipe(it) }; pendingPQDecapsulated?.let { CryptoUtils.wipe(it) }; pendingPQEncapsulated = null; pendingPQDecapsulated = null; pendingHandshakeBundle = null }
+    override fun onStop() { super.onStop(); messages.clear(); countdownTimer?.cancel(); burnCountdownTimer?.cancel(); pendingPQEncapsulated?.let { CryptoUtils.wipe(it) }; pendingPQDecapsulated?.let { CryptoUtils.wipe(it) }; pendingPQEncapsulated = null; pendingPQDecapsulated = null; pendingHandshakeBundle = null; pendingOutgoing = null; handshakeSent = false; pqExchanged = false; activeMode = Mode.NONE }
     override fun onDestroy() { super.onDestroy(); if (::ratchet.isInitialized) ratchet.wipe(); if (::hotspotTransport.isInitialized) hotspotTransport.close(); if (::bleTransport.isInitialized) bleTransport.close(); loraTransport?.close(); wifiAwareTransport?.close(); wifiDirectTransport?.close(); cellularTransport?.close(); if (::meshRouter.isInitialized) meshRouter.wipe(); if (::identityManager.isInitialized) identityManager.wipeAll() }
 }

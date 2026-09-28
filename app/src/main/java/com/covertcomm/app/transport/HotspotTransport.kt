@@ -183,11 +183,26 @@ class HotspotTransport(
     }
 
     private fun getServerIpAddress(): String {
-        return if (isHost) {
-            "192.168.49.1"
-        } else {
-            "0.0.0.0"
-        }
+        // The gateway address differs across OEMs (192.168.43.1, 192.168.49.1,
+        // 192.168.232.1, ...), so detect the address of our own Wi-Fi interface
+        // instead of hardcoding one.
+        try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val nif = interfaces.nextElement()
+                if (!nif.isUp || nif.isLoopback) continue
+                val name = nif.name ?: continue
+                if (!name.startsWith("wlan") && !name.startsWith("ap") && !name.startsWith("swlan")) continue
+                val addrs = nif.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val addr = addrs.nextElement()
+                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
+                        return addr.hostAddress ?: "192.168.43.1"
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return "192.168.43.1"
     }
 
     fun close() {

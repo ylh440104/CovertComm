@@ -11,8 +11,12 @@ object SecurityGuard {
     private var lastAppliedFlags = 0
 
     fun apply(activity: Activity) {
-        NativeGuard.initAntiDebug()
-        NativeGuard.initScramble()
+        // Native anti-debug / anti-tamper is best-effort: if the library is
+        // missing or fails to load we must not take the whole app down with it,
+        // otherwise transports are never initialised.
+        try { NativeGuard.initAntiDebug() } catch (e: Throwable) { }
+        try { NativeGuard.initScramble() } catch (e: Throwable) { }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             activity.setRecentsScreenshotEnabled(false)
         }

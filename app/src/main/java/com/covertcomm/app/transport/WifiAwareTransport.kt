@@ -146,6 +146,14 @@ class WifiAwareTransport(
                 Log.d(TAG, "Subscribe started: $serviceName")
             }
 
+            override fun onServiceDiscovered(peer: PeerHandle, serviceSpecificInfo: ByteArray?, matchFilter: MutableList<ByteArray>?) {
+                // The subscriber must speak first: a passive subscriber otherwise
+                // never learns the publisher's PeerHandle and sendData stays stuck
+                // on "No NAN session or peer".
+                peerHandle = peer
+                listener?.onPeerDiscovered("nan:peer")
+            }
+
             override fun onSessionConfigFailed() {
                 listener?.onDiscoveryFailed("Subscribe config failed")
                 Log.e(TAG, "Subscribe config failed")
@@ -225,13 +233,9 @@ class WifiAwareTransport(
             data,
             seqNum
         )
-        val frameBytes = frame.toBytes()
-        if (frameBytes.size <= MESSAGE_MAX_NAN) {
-            sendData(frameBytes)
-        } else {
-            val chunks = frameBytes.toList().chunked(MESSAGE_MAX_NAN).map { it.toByteArray() }
-            for (chunk in chunks) sendData(chunk)
-        }
+        // Always go through the fragment envelope; chunking the raw frame bytes
+        // here would bypass reassembly on the other side.
+        sendData(frame.toBytes())
     }
 
     private fun sendHandshake() {
@@ -262,32 +266,39 @@ class WifiAwareTransport(
         val fragIdx = data[3].toInt() and 0xFF
         val total = data[4].toInt() and 0xFF
         val payloadLen = data[5].toInt() and 0xFF
+        if (payloadLen > data.size - 6) return
         val payload = data.copyOfRange(6, 6 + payloadLen)
 
         if (total <= 1) {
-            listener?.onMessageReceived(payload, ByteArray(2))
+            handleAssembledFrame(payload)
             return
         }
 
-        val expected = total
-        fragTotal[mid] = expected
-        val current = (fragCount[mid] ?: 0) + 1
-        fragCount[mid] = current
+        val chunk = MESSAGE_MAX_NAN - 6
+        val buffer = fragBuffer.getOrPut(mid) { ByteArray(total * chunk) }
+        val received = fragCount.getOrPut(mid) { 0 }
+        synchronized(buffer) {
+            val offset = fragIdx * chunk
+            if (offset + payload.size <= buffer.size) {
+                System.arraycopy(payload, 0, buffer, offset, payload.size)
+            }
+        }
+        fragCount[mid] = received + 1
 
-        val buf = fragBuffer.getOrPut(mid) { ByteArray(0) }
-        fragBuffer[mid] = buf + payload
-
-        if (current >= expected) {
-            val full = fragBuffer[mid] ?: ByteArray(0)
+        if (received + 1 >= total) {
             fragBuffer.remove(mid)
             fragCount.remove(mid)
             fragTotal.remove(mid)
-            val frame = MeshFrame.parse(full)
-            if (frame != null && router != null) {
-                router!!.processIncomingFrame(frame, ByteArray(2))
-            } else {
-                listener?.onMessageReceived(full, ByteArray(2))
-            }
+            handleAssembledFrame(buffer)
+        }
+    }
+
+    private fun handleAssembledFrame(frameBytes: ByteArray) {
+        val frame = MeshFrame.parse(frameBytes)
+        if (frame != null && router != null) {
+            router!!.processIncomingFrame(frame, ByteArray(2))
+        } else {
+            listener?.onMessageReceived(frameBytes, ByteArray(2))
         }
     }
 

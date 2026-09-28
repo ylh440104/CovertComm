@@ -1,5 +1,16 @@
 package com.covertcomm.app.crypto
 
+/**
+ * Symmetric X3DH-style key agreement over X25519.
+ *
+ * Both parties contribute a static key (preKey) and an ephemeral key (dhKey).
+ * Only X25519 keys are used for the Diffie-Hellman set: an Ed25519 identity key
+ * cannot be used for key agreement, and doing so previously produced different
+ * root keys on each side, breaking every session.
+ *
+ * DH set (ordered before hashing, so both sides agree):
+ *   S_a<->E_b, E_a<->S_b, E_a<->E_b
+ */
 object X3DH {
 
     data class PreKeyBundle(
@@ -18,70 +29,63 @@ object X3DH {
     )
 
     fun initiate(
-        myIdPriv: ByteArray,
-        myEphPriv: ByteArray,
+        myStaticPriv: ByteArray,
+        myEphemeralPriv: ByteArray,
         theirBundle: PreKeyBundle,
         pqSharedSecret: ByteArray? = null,
         pqDecapsulatedSecret: ByteArray? = null
     ): X3DHResult {
-        val theirIdPub = CryptoUtils.decodeKey(theirBundle.identityKey)
-        val theirPrePub = CryptoUtils.decodeKey(theirBundle.preKey)
+        val theirStaticPub = CryptoUtils.decodeKey(theirBundle.preKey)
+        val theirEphemeralPub = CryptoUtils.decodeKey(theirBundle.dhKey)
+        return derive(myStaticPriv, myEphemeralPriv, theirStaticPub, theirEphemeralPub, theirBundle.dhKey, pqSharedSecret, pqDecapsulatedSecret)
+    }
 
-        val dh1 = CryptoUtils.computeSharedSecret(myIdPriv, theirPrePub)
-        val dh2 = CryptoUtils.computeSharedSecret(myEphPriv, theirIdPub)
-        val dh3 = CryptoUtils.computeSharedSecret(myEphPriv, theirPrePub)
+    fun respond(
+        myStaticPriv: ByteArray,
+        myEphemeralPriv: ByteArray,
+        theirStaticPub: ByteArray,
+        theirEphemeralPub: ByteArray,
+        theirDHPublic: String = ""
+    ): X3DHResult {
+        return derive(myStaticPriv, myEphemeralPriv, theirStaticPub, theirEphemeralPub, theirDHPublic, null, null)
+    }
 
-        var combined = dh1 + dh2 + dh3
+    private fun derive(
+        myStaticPriv: ByteArray,
+        myEphemeralPriv: ByteArray,
+        theirStaticPub: ByteArray,
+        theirEphemeralPub: ByteArray,
+        theirDHPublic: String,
+        pqSharedSecret: ByteArray?,
+        pqDecapsulatedSecret: ByteArray?
+    ): X3DHResult {
+        val dh1 = CryptoUtils.computeSharedSecret(myStaticPriv, theirEphemeralPub)   // S_a <-> E_b
+        val dh2 = CryptoUtils.computeSharedSecret(myEphemeralPriv, theirStaticPub)   // E_a <-> S_b
+        val dh3 = CryptoUtils.computeSharedSecret(myEphemeralPriv, theirEphemeralPub) // E_a <-> E_b
+
+        val ordered = listOf(dh1, dh2, dh3).sortedWith(Comparator { a, b -> compareBytes(a, b) })
+        var combined = ordered.fold(ByteArray(0)) { acc, b -> acc + b }
+
         var pqSalt = ByteArray(0)
-        if (pqSharedSecret != null && pqDecapsulatedSecret != null) {
-            val ordered = if (byteArrayCompare(pqSharedSecret, pqDecapsulatedSecret) <= 0) {
-                pqSharedSecret + pqDecapsulatedSecret
-            } else {
-                pqDecapsulatedSecret + pqSharedSecret
-            }
-            combined = combined + ordered
-            pqSalt = CryptoUtils.sha256(ordered)
-        } else if (pqSharedSecret != null) {
-            combined = combined + pqSharedSecret
-            pqSalt = CryptoUtils.sha256(pqSharedSecret)
+        val pqParts = listOfNotNull(pqSharedSecret, pqDecapsulatedSecret).sortedWith(Comparator { a, b -> compareBytes(a, b) })
+        if (pqParts.isNotEmpty()) {
+            for (p in pqParts) combined += p
+            pqSalt = CryptoUtils.sha256(pqParts.fold(ByteArray(0)) { acc, b -> acc + b })
         }
-        val rootKey = CryptoUtils.hkdf(combined, salt = pqSalt, info = "X3DH_PQ_RootKey".toByteArray())
-        val chainKey = CryptoUtils.hkdf(rootKey, info = "X3DH_PQ_ChainKey".toByteArray())
 
-        CryptoUtils.wipe(dh1)
-        CryptoUtils.wipe(dh2)
-        CryptoUtils.wipe(dh3)
+        val rootKey = CryptoUtils.hkdf(combined, salt = pqSalt, info = "X3DH_RootKey".toByteArray())
+        val chainKey = CryptoUtils.hkdf(rootKey, info = "X3DH_ChainKey".toByteArray())
+
+        CryptoUtils.wipe(dh1); CryptoUtils.wipe(dh2); CryptoUtils.wipe(dh3)
         CryptoUtils.wipe(combined)
         pqSharedSecret?.let { CryptoUtils.wipe(it) }
         pqDecapsulatedSecret?.let { CryptoUtils.wipe(it) }
         if (pqSalt.isNotEmpty()) CryptoUtils.wipe(pqSalt)
 
-        return X3DHResult(rootKey, chainKey, theirBundle.dhKey)
+        return X3DHResult(rootKey, chainKey, theirDHPublic)
     }
 
-    fun respond(
-        myIdPriv: ByteArray,
-        myPrePriv: ByteArray,
-        theirIdPub: ByteArray,
-        theirEphPub: ByteArray
-    ): X3DHResult {
-        val dh1 = CryptoUtils.computeSharedSecret(myPrePriv, theirIdPub)
-        val dh2 = CryptoUtils.computeSharedSecret(myIdPriv, theirEphPub)
-        val dh3 = CryptoUtils.computeSharedSecret(myPrePriv, theirEphPub)
-
-        val combined = dh1 + dh2 + dh3
-        val rootKey = CryptoUtils.hkdf(combined, info = "X3DH_RootKey".toByteArray())
-        val chainKey = CryptoUtils.hkdf(rootKey, info = "X3DH_ChainKey".toByteArray())
-
-        CryptoUtils.wipe(dh1)
-        CryptoUtils.wipe(dh2)
-        CryptoUtils.wipe(dh3)
-        CryptoUtils.wipe(combined)
-
-        return X3DHResult(rootKey, chainKey, "")
-    }
-
-    private fun byteArrayCompare(a: ByteArray, b: ByteArray): Int {
+    private fun compareBytes(a: ByteArray, b: ByteArray): Int {
         val minLen = minOf(a.size, b.size)
         for (i in 0 until minLen) {
             val cmp = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
