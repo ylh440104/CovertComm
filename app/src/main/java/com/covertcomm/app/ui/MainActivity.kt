@@ -634,7 +634,7 @@ class MainActivity : ComponentActivity() {
             pqEncapsulated,
             pqDecapsulated
         )
-        ratchet.initialize(result)
+        ratchet.initialize(result, identityManager.identityKeyPair!!.publicKey, CryptoUtils.decodeKey(bundle.identityKey))
         // Derive a separate MAC key (don't reuse the ratchet chain key) so both
         // peers can authenticate mesh frames with a domain-separated key.
         val macKey = CryptoUtils.hkdf(result.chainKey, info = "mesh_mac_key".toByteArray())

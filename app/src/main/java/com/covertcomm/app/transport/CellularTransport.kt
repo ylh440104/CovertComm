@@ -68,6 +68,12 @@ class CellularTransport(
 
     private val seenAnns = ConcurrentHashMap<String, Long>()
 
+    // MQTT 3.1.1 has no "no local" option, so the broker echoes a client's own
+    // PUBLISH back to it. Without this, our own messages are re-processed as if
+    // they came from the peer (overwriting the pending handshake bundle and
+    // colliding on ratchet counters, which surfaced as "Decrypt failed").
+    private val ownEchoes = ConcurrentHashMap<String, Long>()
+
     var listener: CellularListener? = null
 
     interface CellularListener {
@@ -287,6 +293,12 @@ class CellularTransport(
 
     private fun handleIncoming(payload: ByteArray) {
         val key = sessionKey ?: return
+        // Drop the broker's echo of our own PUBLISH (see ownEchoes).
+        val echo = echoKey(payload)
+        if (ownEchoes.remove(echo) != null) {
+            trace("ignored own echo")
+            return
+        }
         val aad = CryptoUtils.sha256(("cc-aad:" + passphrase).toByteArray())
         val unwrapped = nestedSession?.let { NestedCipher.decrypt(it, payload) } ?: payload
         val plain = try {
@@ -354,6 +366,18 @@ class CellularTransport(
     private fun publish(payload: ByteArray) {
         if (!connected) { trace("publish skipped, not connected"); return }
         try {
+            // Remember this payload so the broker's echo of our own PUBLISH can be
+            // dropped instead of being treated as an inbound peer message.
+            val fingerprint = echoKey(payload)
+            val now = System.currentTimeMillis()
+            ownEchoes[fingerprint] = now
+            if (ownEchoes.size > 512) {
+                val iter = ownEchoes.entries.iterator()
+                while (iter.hasNext()) {
+                    if (now - iter.next().value > 120_000) iter.remove()
+                }
+            }
+
             val tb = topic.toByteArray(Charsets.UTF_8)
             synchronized(writeLock) {
                 val pid = nextPacketIdLocked()
@@ -380,6 +404,10 @@ class CellularTransport(
         packetId++
         if (packetId > 65535) packetId = 1
         return packetId
+    }
+
+    private fun echoKey(payload: ByteArray): String {
+        return CryptoUtils.sha256(payload).copyOfRange(0, 16).joinToString("") { "%02x".format(it) }
     }
 
     private fun sendPuback(pid: Int) {
@@ -490,5 +518,6 @@ class CellularTransport(
         nestedSession?.wipe()
         nestedSession = null
         seenAnns.clear()
+        ownEchoes.clear()
     }
 }

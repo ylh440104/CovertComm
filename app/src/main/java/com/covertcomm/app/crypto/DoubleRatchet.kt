@@ -1,25 +1,25 @@
 package com.covertcomm.app.crypto
 
 /**
- * Simplified symmetric ratchet.
+ * Simplified symmetric ratchet with directional chains.
  *
- * The X3DH output (root key + chain key) is shared by both sides, so a single
- * chain is used without the "who sends first" ambiguity that previously left the
- * responder unable to decrypt anything. Message keys are derived per index (HKDF
- * with the counter as info) so out-of-order delivery still decrypts.
+ * The X3DH output is shared by both sides. To avoid the two peers colliding on
+ * the same message numbers (which made the second speaker's messages look like
+ * replays and fail to decrypt), the shared chain key is split into two
+ * directional chains. The peer with the lexicographically smaller identity key
+ * sends on chain A and receives on chain B, the other peer does the reverse, so
+ * each direction has its own independent counter space.
  *
- * Replay protection: each inbound index is consumed exactly once. A duplicate
- * (same index again) is rejected instead of being decrypted with a re-derived
- * key, which previously made replays indistinguishable from retransmissions.
+ * Replay protection: each inbound index is consumed exactly once per direction.
  */
 class DoubleRatchet(
     private val identityManager: IdentityManager
 ) {
     private var rootKey: ByteArray = ByteArray(0)
-    private var chainKey: ByteArray = ByteArray(0)
-    private var sendCounter = 0
-    private var recvCounter = 0
+    private var sendChainKey: ByteArray = ByteArray(0)
+    private var recvChainKey: ByteArray = ByteArray(0)
 
+    private var sendCounter = 0
     private val consumedRecv = HashSet<Int>()
     private val usedSendKeys = LinkedHashMap<Int, ByteArray>()
 
@@ -36,11 +36,15 @@ class DoubleRatchet(
 
     class ReplayException(message: String) : Exception(message)
 
-    fun initialize(x3dhResult: X3DH.X3DHResult) {
+    fun initialize(x3dhResult: X3DH.X3DHResult, myIdentityPub: ByteArray, theirIdentityPub: ByteArray) {
         rootKey = x3dhResult.rootKey
-        chainKey = x3dhResult.chainKey
+        val chainA = CryptoUtils.hkdf(x3dhResult.chainKey, info = "chainA".toByteArray())
+        val chainB = CryptoUtils.hkdf(x3dhResult.chainKey, info = "chainB".toByteArray())
+        val iAmA = compareBytes(myIdentityPub, theirIdentityPub) <= 0
+        sendChainKey = if (iAmA) chainA else chainB
+        recvChainKey = if (iAmA) chainB else chainA
+        CryptoUtils.wipe(if (iAmA) chainB else chainA)
         sendCounter = 0
-        recvCounter = 0
         consumedRecv.clear()
         usedSendKeys.clear()
         initialized = true
@@ -49,7 +53,7 @@ class DoubleRatchet(
     fun encrypt(plaintext: ByteArray): RatchetMessage {
         check(initialized) { "Ratchet not initialized" }
         val index = sendCounter
-        val messageKey = deriveMessageKey(index)
+        val messageKey = deriveMessageKey(sendChainKey, index)
         sendCounter++
 
         val payload = CryptoUtils.encryptAESGCM(messageKey, plaintext)
@@ -72,9 +76,8 @@ class DoubleRatchet(
         if (!consumedRecv.add(index)) {
             throw ReplayException("Message $index already processed")
         }
-        if (index >= recvCounter) recvCounter = index + 1
 
-        val messageKey = deriveMessageKey(index)
+        val messageKey = deriveMessageKey(recvChainKey, index)
         val payload = CryptoUtils.EncryptedPayload(message.nonce, message.ciphertext)
         return try {
             CryptoUtils.decryptAESGCM(messageKey, payload)
@@ -83,7 +86,7 @@ class DoubleRatchet(
         }
     }
 
-    private fun deriveMessageKey(index: Int): ByteArray {
+    private fun deriveMessageKey(chainKey: ByteArray, index: Int): ByteArray {
         return CryptoUtils.hkdf(
             chainKey,
             info = "msgkey".toByteArray() + byteArrayOf(
@@ -106,9 +109,19 @@ class DoubleRatchet(
         }
     }
 
+    private fun compareBytes(a: ByteArray, b: ByteArray): Int {
+        val minLen = minOf(a.size, b.size)
+        for (i in 0 until minLen) {
+            val cmp = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
+            if (cmp != 0) return cmp
+        }
+        return a.size - b.size
+    }
+
     fun wipe() {
         CryptoUtils.wipe(rootKey)
-        CryptoUtils.wipe(chainKey)
+        CryptoUtils.wipe(sendChainKey)
+        CryptoUtils.wipe(recvChainKey)
         for (v in usedSendKeys.values) CryptoUtils.wipe(v)
         usedSendKeys.clear()
         consumedRecv.clear()
