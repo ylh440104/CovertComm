@@ -75,10 +75,6 @@ class IdentityManager(context: Context) {
         )
     }
 
-    /**
-     * The JSON handshake the peer expects ("type":"handshake" with a "keys"
-     * object). Shared by the transports so every mode sends the same payload.
-     */
     fun handshakeJson(): String {
         val keys = exportEncodedPublicKeys()
         val sb = StringBuilder("{\"type\":\"handshake\",\"keys\":{")

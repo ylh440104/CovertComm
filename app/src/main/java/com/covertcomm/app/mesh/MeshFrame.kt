@@ -19,17 +19,10 @@ object MeshFrame {
     const val MAX_PAYLOAD = 4096
     const val MAX_FRAME_SIZE = FRAME_OVERHEAD + MAX_PAYLOAD
 
-    // Legacy constant, only used before a real MAC key is installed so that
-    // pre-handshake control frames (route probes) still round-trip.
     private val LEGACY_KEY = "mesh_hmac".toByteArray()
 
     @Volatile private var macKey: ByteArray? = null
 
-    /**
-     * Installs the shared MAC key used for frame integrity. Both peers must set
-     * the same key (e.g. derived from the agreed session) for frames to verify.
-     * Passing null restores the legacy pre-handshake behaviour.
-     */
     fun setMacKey(key: ByteArray?) {
         macKey = key?.copyOf()
     }
@@ -39,8 +32,7 @@ object MeshFrame {
         return if (key != null && key.isNotEmpty()) {
             CryptoUtils.hmacSha256(key, data)
         } else {
-            // Not a real MAC, but keeps the frame format stable and still detects
-            // accidental corruption before a session key exists.
+
             CryptoUtils.sha256(data + LEGACY_KEY)
         }
     }

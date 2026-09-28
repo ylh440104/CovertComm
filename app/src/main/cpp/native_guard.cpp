@@ -164,10 +164,6 @@ static void check_root() {
         close(fd);
         if (n > 0) {
             buf[n] = 0;
-            // These were hard kills before. On many stock devices build.prop is
-            // truncated (properties moved to /vendor, /system/etc/prop.default)
-            // or ships as test-keys, so a false positive would kill the app at
-            // launch. Log instead of terminating.
             char *p = strstr(buf, "ro.debuggable");
             if (p) { p += 13; while (*p == '=') p++; if (*p == '1') LOGE("debuggable build"); }
             p = strstr(buf, "ro.build.tags");
@@ -192,9 +188,6 @@ static void check_capture() {
                 line++;
                 unsigned int port = 0;
                 if (sscanf(line, "%*d: %*X:%X", &port) >= 1) {
-                    // Only flag well-known analysis/proxy ports. 8888/8889/9090 are
-                    // intentionally excluded because the app itself listens on 8888
-                    // for the hotspot and Wi-Fi Direct transports.
                     if (port == 8080 || port == 3128 || port == 27042 || port == 27047) {
                         LOGE("proxy/capture port %d", port); die();
                     }
@@ -212,8 +205,6 @@ static void check_capture() {
             int routes = 0;
             char *p = buf;
             while ((p = strstr(p, "\n"))) { routes++; p++; }
-            // Raised from 5: normal devices (dual SIM, VPN, multiple interfaces)
-            // routinely exceed that and were being killed on startup.
             if (routes > 64) { LOGE("vpn/tunnel routes"); die(); }
         }
     }
@@ -295,8 +286,6 @@ Java_com_covertcomm_app_security_NativeGuard_secureWipe(JNIEnv *env, jobject thi
     jbyte *b = env->GetByteArrayElements(data, &is_copy);
     if (!b) return data;
     mem_wipe((unsigned char*)b, len);
-    // A single release: the previous code called ReleaseByteArrayElements twice
-    // on the same array in the copy branch, which is undefined behaviour.
     env->ReleaseByteArrayElements(data, b, 0);
     return data;
 }
@@ -415,4 +404,4 @@ Java_com_covertcomm_app_security_NativeGuard_integrityCheck(JNIEnv *env, jobject
     return 1;
 }
 
-} // extern "C"
+}

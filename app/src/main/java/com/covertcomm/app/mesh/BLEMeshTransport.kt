@@ -13,17 +13,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * BLE transport with passphrase based rendezvous.
- *
- * Fixes in this revision:
- *  - The client now subscribes to the notify characteristic (TX) and writes the
- *    CCCD descriptor, instead of listening on the write-only RX characteristic
- *    (which never produced a notification).
- *  - MTU is negotiated and frames are chunked/reassembled, because the default
- *    ATT payload is 20 bytes while a mesh frame is far larger.
- *  - Notifications are addressed to a concrete device rather than null.
- */
 class BLEMeshTransport(
     private val context: Context,
     private val identityManager: IdentityManager
@@ -45,9 +34,8 @@ class BLEMeshTransport(
     private var rendezvousSession: RendezvousProtocol.RendezvousSession? = null
     private var pendingPassphrase: String? = null
 
-    // Client side connections (central role).
     private val clientGatts = ConcurrentHashMap<String, BluetoothGatt>()
-    // Server side connections (peripheral role).
+
     private val serverDevices = ConcurrentHashMap<String, BluetoothDevice>()
 
     @Volatile private var negotiatedMtu = 23
@@ -277,7 +265,7 @@ class BLEMeshTransport(
 
                 override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
                     val service = g.getService(SERVICE_UUID) ?: return
-                    // Subscribe to the characteristic the peripheral notifies on.
+
                     val charTx = service.getCharacteristic(CHAR_TX_UUID) ?: return
                     try {
                         g.setCharacteristicNotification(charTx, true)
@@ -291,8 +279,7 @@ class BLEMeshTransport(
 
                 override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
                     if (descriptor.uuid == CCCD_UUID) {
-                        // Subscription is ready; the app now drives the handshake
-                        // through the normal sendControl path.
+
                         listener?.onPeerConnected(g.device.address)
                     }
                 }
@@ -379,8 +366,6 @@ class BLEMeshTransport(
         }
     }
 
-    // ---- fragmentation ----------------------------------------------------
-
     @Suppress("DEPRECATION")
     private fun sendRawFrame(frameBytes: ByteArray) {
         val chunk = (negotiatedMtu - 3).coerceAtLeast(20)
@@ -396,7 +381,7 @@ class BLEMeshTransport(
 
     @Suppress("DEPRECATION")
     private fun writePacket(packet: ByteArray) {
-        // Peripheral role: if we have connected centrals, notify them.
+
         val server = gattServer
         if (serverDevices.isNotEmpty() && server != null) {
             val service = server.getService(SERVICE_UUID)
@@ -414,7 +399,6 @@ class BLEMeshTransport(
             return
         }
 
-        // Central role: write to the peripheral's RX characteristic.
         val gatt = connectedGatt
         if (gatt != null) {
             val service = gatt.getService(SERVICE_UUID)
@@ -434,7 +418,7 @@ class BLEMeshTransport(
     private fun handleIncomingBytes(data: ByteArray) {
         val packet = FragmentCodec.decode(FRAG_MAGIC, data)
         if (packet == null) {
-            // Not a fragment envelope: treat as a complete frame.
+
             handleAssembled(data)
             return
         }
@@ -443,8 +427,7 @@ class BLEMeshTransport(
     }
 
     private fun trimToFrame(buffer: ByteArray): ByteArray {
-        // MeshFrame header: version(1) type(1) senderFP(2) targetFP(2) ttl(1)
-        // hops(1) seq(4) payloadLen(2) -> payload length lives at offset 12.
+
         if (buffer.size < MeshFrame.HEADER_SIZE) return buffer
         val payloadLen = ((buffer[12].toInt() and 0xFF) shl 8) or (buffer[13].toInt() and 0xFF)
         val frameLen = MeshFrame.HEADER_SIZE + payloadLen + MeshFrame.HMAC_SIZE

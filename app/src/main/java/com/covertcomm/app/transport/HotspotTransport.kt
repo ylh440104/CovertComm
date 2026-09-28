@@ -101,10 +101,7 @@ class HotspotTransport(
                         clientSocket = client
                         listener?.onPeerConnected(client.inetAddress.hostAddress ?: "unknown")
                         handleClient(client)
-                        // No handshake is sent here: the app drives the handshake
-                        // through sendControl() once a peer is connected. Sending a
-                        // second, differently-shaped handshake from the transport
-                        // used to race with the real one.
+
                     } catch (e: SocketTimeoutException) {
                         continue
                     }
@@ -169,9 +166,7 @@ class HotspotTransport(
     }
 
     private fun getServerIpAddress(): String {
-        // The gateway address differs across OEMs (192.168.43.1, 192.168.49.1,
-        // 192.168.232.1, ...), so detect the address of our own Wi-Fi interface
-        // instead of hardcoding one.
+
         try {
             val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
             while (interfaces.hasMoreElements()) {

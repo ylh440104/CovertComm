@@ -16,18 +16,6 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
-/**
- * Global messaging transport over MQTT 3.1.1 to a public or custom broker.
- *
- * Fixes in this revision:
- *  - PUBLISH parsing consumes the packet identifier for QoS > 0, so inbound
- *    payloads are no longer shifted by two bytes (which broke every decrypt).
- *  - PUBACK is returned for inbound QoS1 messages.
- *  - CONNACK / SUBACK are validated instead of being blindly skipped.
- *  - A PINGREQ keepalive thread stops the broker from dropping an idle link.
- *  - Automatic reconnect with exponential backoff.
- *  - Passphrase -> key derivation hardened with PBKDF2-HMAC-SHA256.
- */
 class CellularTransport(
     private val context: Context,
     private val identityManager: IdentityManager
@@ -68,10 +56,6 @@ class CellularTransport(
 
     private val seenAnns = ConcurrentHashMap<String, Long>()
 
-    // MQTT 3.1.1 has no "no local" option, so the broker echoes a client's own
-    // PUBLISH back to it. Without this, our own messages are re-processed as if
-    // they came from the peer (overwriting the pending handshake bundle and
-    // colliding on ratchet counters, which surfaced as "Decrypt failed").
     private val ownEchoes = ConcurrentHashMap<String, Long>()
 
     var listener: CellularListener? = null
@@ -194,8 +178,8 @@ class CellularTransport(
         body[i++] = 'Q'.code.toByte()
         body[i++] = 'T'.code.toByte()
         body[i++] = 'T'.code.toByte()
-        body[i++] = 0x04                                    // protocol level 3.1.1
-        body[i++] = 0x02                                    // clean session
+        body[i++] = 0x04
+        body[i++] = 0x02
         body[i++] = ((KEEPALIVE_S shr 8) and 0xFF).toByte()
         body[i++] = (KEEPALIVE_S and 0xFF).toByte()
         body[i++] = ((id.size shr 8) and 0xFF).toByte()
@@ -214,7 +198,7 @@ class CellularTransport(
         if (b0 != 0x20) throw IOException("Expected CONNACK, got 0x%02x".format(b0))
         val len = readRemainingLength()
         if (len != 2) throw IOException("Bad CONNACK length $len")
-        input!!.readUnsignedByte()                          // session present flag
+        input!!.readUnsignedByte()
         val rc = input!!.readUnsignedByte()
         if (rc != 0) throw IOException("Broker refused connection (code $rc)")
     }
@@ -224,12 +208,12 @@ class CellularTransport(
         val body = ByteArray(2 + 2 + tb.size + 1)
         var i = 0
         body[i++] = 0x00
-        body[i++] = 0x01                                    // packet id 1
+        body[i++] = 0x01
         body[i++] = ((tb.size shr 8) and 0xFF).toByte()
         body[i++] = (tb.size and 0xFF).toByte()
         System.arraycopy(tb, 0, body, i, tb.size)
         i += tb.size
-        body[i] = 0x01                                      // requested QoS 1
+        body[i] = 0x01
 
         synchronized(writeLock) {
             writeAll(byteArrayOf(0x82.toByte()) + encodeRemainingLength(body.size))
@@ -243,8 +227,8 @@ class CellularTransport(
         if ((b0 and 0xF0) != 0x90) throw IOException("Expected SUBACK, got 0x%02x".format(b0))
         val len = readRemainingLength()
         if (len < 3) throw IOException("Bad SUBACK length $len")
-        input!!.readUnsignedShort()                         // packet id
-        val granted = input!!.readUnsignedByte()            // first return code
+        input!!.readUnsignedShort()
+        val granted = input!!.readUnsignedByte()
         if (len > 3) skipFully(len - 3)
         if (granted == 0x80) throw IOException("Subscription rejected by broker")
     }
@@ -260,7 +244,7 @@ class CellularTransport(
             if (remaining < 0) break
             when (type) {
                 PKT_PUBLISH -> handlePublish(flags, remaining)
-                else -> skipFully(remaining)                // PUBACK / SUBACK / PINGRESP / CONNACK
+                else -> skipFully(remaining)
             }
         }
     }
@@ -293,9 +277,7 @@ class CellularTransport(
 
     private fun handleIncoming(payload: ByteArray) {
         val key = sessionKey ?: return
-        // Drop the broker's echo of our own PUBLISH. The entry is NOT removed on
-        // match: a QoS1 retransmission can deliver the same echo more than once,
-        // and removing it would let the duplicate through on the second copy.
+
         val echo = echoKey(payload)
         if (ownEchoes.containsKey(echo)) {
             trace("ignored own echo")
@@ -320,7 +302,7 @@ class CellularTransport(
                     if (prev == null || now - prev > 60_000) {
                         seenAnns[peerId] = now
                         listener?.onPeerJoined(peerId)
-                        // Answer once so the peer learns about us, then stay quiet.
+
                         Thread {
                             try { Thread.sleep(300) } catch (_: InterruptedException) {}
                             sendAnnounce()
@@ -342,8 +324,7 @@ class CellularTransport(
         val aad = CryptoUtils.sha256(("cc-aad:" + passphrase).toByteArray())
         val ep = CryptoUtils.encryptAESGCM(key, data, aad)
         var ct = ep.toCombined()
-        // Extra layered pass (Feistel + XOR + AES-GCM) as documented for the
-        // cellular path.
+
         nestedSession?.let { ct = NestedCipher.encrypt(it, ct) }
         publish(ct)
         SecurityGuard.wipeMemory(ep.nonce)
@@ -368,8 +349,7 @@ class CellularTransport(
     private fun publish(payload: ByteArray) {
         if (!connected) { trace("publish skipped, not connected"); return }
         try {
-            // Remember this payload so the broker's echo of our own PUBLISH can be
-            // dropped instead of being treated as an inbound peer message.
+
             val fingerprint = echoKey(payload)
             val now = System.currentTimeMillis()
             ownEchoes[fingerprint] = now

@@ -84,9 +84,7 @@ class MeshRouter(
                 listener?.onFrameReady(reply.toBytes(), nextHop)
             }
             MeshFrame.TYPE_ROUTE_REPLY -> {
-                // Record the reverse path so subsequent data can be routed back,
-                // then notify. Without addRoute the routing table stayed empty and
-                // multi-hop forwarding never worked.
+
                 val nextHop = reverseRoute[fpKey(frame.senderFP)]
                 if (nextHop != null) addRoute(frame.senderFP, nextHop)
                 listener?.onRouteEstablished(frame.senderFP)

@@ -130,8 +130,7 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        // Only the location/nearby permissions are essential for BLE discovery;
-        // a denied optional permission should not block transport setup entirely.
+
         val locationGranted = result[Manifest.permission.ACCESS_FINE_LOCATION] != false &&
                 result[Manifest.permission.ACCESS_COARSE_LOCATION] != false
         if (locationGranted) {
@@ -157,8 +156,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         requestPermissions()
-        // Window/FLAG_SECURE work must happen on the main thread; doing it in the
-        // background thread below could throw and abort transport initialisation.
+
         SecurityGuard.apply(this)
         thread {
             identityManager = IdentityManager(this)
@@ -530,7 +528,6 @@ class MainActivity : ComponentActivity() {
         val plaintext = text.toByteArray(Charsets.UTF_8)
         val padded = CryptoUtils.padWithLengthPrefix(plaintext)
         val rm = ratchet.encrypt(padded)
-        diag("SEND num=" + rm.messageNumber + " sendKey=" + ratchet.debugSendKey(rm.messageNumber) + " " + ratchet.debugChains())
         val json = JSONObject()
         json.put("type", "msg"); json.put("dhPublicKey", rm.dhPublicKey); json.put("pnum", rm.previousMessageNumber); json.put("num", rm.messageNumber)
         json.put("burn", burnAfterRead)
@@ -563,18 +560,6 @@ class MainActivity : ComponentActivity() {
 
     private fun encodeKey(key: ByteArray): String = Base64.encodeToString(key, Base64.NO_WRAP)
 
-    // Temporary diagnostic: records the handshake/decrypt state to a file on the
-    // device so the key-agreement mismatch can be inspected without a debugger.
-    private fun diag(msg: String) {
-        try {
-            val f = java.io.File("/sdcard/Download/cc_diag.log")
-            java.io.FileOutputStream(f, true).bufferedWriter().use { it.appendLine("${System.currentTimeMillis()} $msg") }
-        } catch (_: Exception) {}
-    }
-
-    private fun fpOf(b: ByteArray): String =
-        CryptoUtils.sha256(b).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
-
     private fun handleIncomingMessage(data: ByteArray) {
         try { val json = JSONObject(String(data, Charsets.UTF_8)); when (json.optString("type")) { "handshake" -> handleHandshake(json); "pq_exchange" -> handlePQExchange(json); "msg" -> handleEncryptedMessage(json) } } catch (_: Exception) {}
         SecurityGuard.wipeMemory(data)
@@ -584,11 +569,6 @@ class MainActivity : ComponentActivity() {
         try {
             val k = json.getJSONObject("keys")
             val theirIdentity = k.getString("identityKey")
-            diag("HS recv theirId=" + CryptoUtils.sha256(CryptoUtils.decodeKey(theirIdentity)).copyOfRange(0,4).joinToString(""){"%02x".format(it)} + " hsSent=" + handshakeSent + " pqExch=" + pqExchanged + " pqKeyPresent=" + k.optString("pqPublicKey","").isNotEmpty() + " myPq=" + (identityManager.pqKeyPair != null))
-            // Hard guard against processing our own handshake. On MQTT the broker
-            // echoes our PUBLISH back to us; if such an echo reaches here it would
-            // overwrite the pending bundle with our own keys and make both peers
-            // believe they are the same role, breaking key agreement.
             if (theirIdentity == encodeKey(identityManager.identityKeyPair!!.publicKey)) {
                 return
             }
@@ -600,8 +580,6 @@ class MainActivity : ComponentActivity() {
             )
             pendingHandshakeBundle = bundle
 
-            // Make the exchange symmetric: whoever receives a handshake replies
-            // with its own (once) so both sides end up with the peer's bundle.
             if (!handshakeSent) sendHandshake()
 
             val pqKey = k.optString("pqPublicKey", "")
@@ -618,7 +596,7 @@ class MainActivity : ComponentActivity() {
                 }
                 tryInitRatchetWithPQ()
             } else {
-                // Either side without a post-quantum key falls back to classical X3DH.
+
                 initRatchet(bundle)
             }
         } catch (e: Exception) {
@@ -630,7 +608,6 @@ class MainActivity : ComponentActivity() {
         try {
             val ct = Base64.decode(json.getString("ciphertext"), Base64.NO_WRAP)
             pendingPQDecapsulated = identityManager.decapsulatePQ(ct)
-            diag("PQ_EXCH recv ctLen=" + ct.size + " decOk=" + (pendingPQDecapsulated != null) + " bundlePresent=" + (pendingHandshakeBundle != null) + " encPresent=" + (pendingPQEncapsulated != null))
             tryInitRatchetWithPQ()
         } catch (_: Exception) {}
     }
@@ -648,8 +625,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun initRatchet(bundle: X3DH.PreKeyBundle, pqEncapsulated: ByteArray? = null, pqDecapsulated: ByteArray? = null) {
-        // Guard against a concurrent or repeated handshake re-initialising a
-        // live session, which would reset the ratchet counters and break it.
         if (::ratchet.isInitialized && ratchet.initialized) return
         val result = X3DH.initiate(
             identityManager.preKeyPair!!.privateKey,
@@ -659,18 +634,6 @@ class MainActivity : ComponentActivity() {
             pqDecapsulated
         )
         ratchet.initialize(result, identityManager.identityKeyPair!!.publicKey, CryptoUtils.decodeKey(bundle.identityKey))
-        diag("INIT rootKey=" + CryptoUtils.sha256(result.rootKey).copyOfRange(0,8).joinToString(""){"%02x".format(it)} +
-             " chainKey=" + CryptoUtils.sha256(result.chainKey).copyOfRange(0,8).joinToString(""){"%02x".format(it)} +
-             " myId=" + CryptoUtils.sha256(identityManager.identityKeyPair!!.publicKey).copyOfRange(0,4).joinToString(""){"%02x".format(it)} +
-             " theirId=" + CryptoUtils.sha256(CryptoUtils.decodeKey(bundle.identityKey)).copyOfRange(0,4).joinToString(""){"%02x".format(it)} +
-             " pqEnc=" + (pqEncapsulated != null) + " pqDec=" + (pqDecapsulated != null))
-        diag("  " + X3DH.debugLog)
-        diag("  keys myPre=" + fpOf(identityManager.preKeyPair!!.publicKey) +
-             " myDh=" + fpOf(identityManager.currentDHKeyPair!!.publicKey) +
-             " theirPre=" + fpOf(CryptoUtils.decodeKey(bundle.preKey)) +
-             " theirDh=" + fpOf(CryptoUtils.decodeKey(bundle.dhKey)))
-        // Derive a separate MAC key (don't reuse the ratchet chain key) so both
-        // peers can authenticate mesh frames with a domain-separated key.
         val macKey = CryptoUtils.hkdf(result.chainKey, info = "mesh_mac_key".toByteArray())
         com.covertcomm.app.mesh.MeshFrame.setMacKey(macKey)
         CryptoUtils.wipe(macKey)
@@ -707,7 +670,6 @@ class MainActivity : ComponentActivity() {
         if (!::ratchet.isInitialized || !ratchet.initialized) { messages.add(ChatMessage("[No session]", false)); return }
         try {
             val rm = DoubleRatchet.RatchetMessage(json.getString("dhPublicKey"), json.getInt("pnum"), json.getInt("num"), Base64.decode(json.getString("nonce"), Base64.NO_WRAP), Base64.decode(json.getString("ciphertext"), Base64.NO_WRAP))
-            diag("RECV num=" + rm.messageNumber + " expectRecvKey=" + ratchet.debugRecvKey(rm.messageNumber) + " " + ratchet.debugChains())
             val padded = ratchet.decrypt(rm); val pt = CryptoUtils.unpadWithLengthPrefix(padded); val text = String(pt, Charsets.UTF_8)
             val burn = json.optBoolean("burn", false)
             messages.add(ChatMessage(text, false, burnAfterRead = burn))
@@ -720,7 +682,7 @@ class MainActivity : ComponentActivity() {
                 }.start()
             }
             CryptoUtils.wipe(padded); CryptoUtils.wipe(pt)
-        } catch (e: Exception) { diag("DECRYPT_FAIL num=" + runCatching { json.getInt("num") }.getOrDefault(-1) + " " + e.message); messages.add(ChatMessage("[Decrypt failed]", false)) }
+        } catch (_: Exception) { messages.add(ChatMessage("[Decrypt failed]", false)) }
     }
 
     private val hotspotListener = object : HotspotTransport.HotspotListener {
@@ -776,7 +738,6 @@ class MainActivity : ComponentActivity() {
         override fun onDiscoveryFailed(reason: String) { runOnUiThread { messages.add(ChatMessage("[P2P scan failed]", false)) } }
         override fun onPeerFound(deviceName: String) { runOnUiThread { messages.add(ChatMessage("[P2P peer: $deviceName]", false)) } }
     }
-
 
     private val cellularListener = object : CellularTransport.CellularListener {
         override fun onConnected(address: String) { runOnUiThread { statusText.value = "Connected"; statusConnected.value = true; messages.add(ChatMessage("[Cellular: $address]", false)) } }

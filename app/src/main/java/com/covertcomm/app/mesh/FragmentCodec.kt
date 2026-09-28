@@ -2,26 +2,10 @@ package com.covertcomm.app.mesh
 
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Shared fragmentation codec for the BLE, Wi-Fi Aware and LoRa transports.
- *
- * Wire format (big-endian):
- *   magic(1) | msgId(2) | index(1) | total(1) | len(1) | chunk(2) | payload(len)
- *
- * [chunk] is the fragmentation stride used by the sender. Carrying it in the
- * header means reassembly does not depend on the receiver's local MTU, which can
- * differ from the sender's (for example when one side never completes MTU
- * negotiation and stays at the 23-byte default). Relying on the local value
- * previously made the two ends disagree on the stride and corrupt reassembly.
- *
- * This is pure byte handling with no Android dependencies, so it is unit tested.
- */
 object FragmentCodec {
 
-    /** magic(1) + msgId(2) + index(1) + total(1) + len(1) + chunk(2) */
     const val HEADER = 8
 
-    /** Largest payload a single fragment can carry, used to size buffers. */
     const val MAX_PAYLOAD = 250
 
     data class Packet(
@@ -58,10 +42,6 @@ object FragmentCodec {
         return Packet(msgId, index, total, chunk, data.copyOfRange(HEADER, HEADER + len))
     }
 
-    /**
-     * Splits [frame] into fragments. Returns a single fragment when it fits.
-     * [chunk] must match what the receiver uses to lay the fragments out.
-     */
     fun fragment(magic: Byte, msgId: Int, frame: ByteArray, chunk: Int): List<ByteArray> {
         require(chunk > 0) { "chunk must be positive" }
         if (frame.size <= chunk) {
@@ -80,10 +60,6 @@ object FragmentCodec {
     }
 }
 
-/**
- * Reassembles fragments produced by [FragmentCodec.fragment]. Stateful: one
- * instance per transport. Not thread safe by itself; callers synchronise.
- */
 class FragmentAssembler(
     private val maxFrame: Int = 64 * 1024,
     private val timeoutMs: Long = 20000L
@@ -100,10 +76,6 @@ class FragmentAssembler(
 
     private val entries = ConcurrentHashMap<Int, Entry>()
 
-    /**
-     * Offers one packet. Returns the complete frame once every fragment has
-     * arrived, otherwise null. Duplicate fragments are ignored.
-     */
     fun offer(p: FragmentCodec.Packet): ByteArray? {
         if (p.total == 1) return p.payload
 
@@ -114,7 +86,7 @@ class FragmentAssembler(
 
         var complete: ByteArray? = null
         if (e.total != p.total || e.chunk != p.chunk) {
-            // Sender restarted with the same id but different layout; drop it.
+
             entries.remove(p.msgId)
             return null
         }
@@ -148,6 +120,5 @@ class FragmentAssembler(
 
     fun clear() = entries.clear()
 
-    /** Test/diagnostic helper. */
     fun pending(): Int = entries.size
 }

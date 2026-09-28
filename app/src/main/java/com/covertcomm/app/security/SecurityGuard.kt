@@ -11,9 +11,7 @@ object SecurityGuard {
     private var lastAppliedFlags = 0
 
     fun apply(activity: Activity) {
-        // Native anti-debug / anti-tamper is best-effort: if the library is
-        // missing or fails to load we must not take the whole app down with it,
-        // otherwise transports are never initialised.
+
         try { NativeGuard.initAntiDebug() } catch (e: Throwable) { }
         try { NativeGuard.initScramble() } catch (e: Throwable) { }
 

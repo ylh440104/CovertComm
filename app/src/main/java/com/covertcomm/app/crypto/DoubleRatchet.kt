@@ -1,21 +1,8 @@
 package com.covertcomm.app.crypto
 
-/**
- * Simplified symmetric ratchet with directional chains.
- *
- * The X3DH output is shared by both sides. To avoid the two peers colliding on
- * the same message numbers (which made the second speaker's messages look like
- * replays and fail to decrypt), the shared chain key is split into two
- * directional chains. The peer with the lexicographically smaller identity key
- * sends on chain A and receives on chain B, the other peer does the reverse, so
- * each direction has its own independent counter space.
- *
- * Replay protection: each inbound index is consumed exactly once per direction.
- */
 class DoubleRatchet(
     private val dhPublicKeyProvider: () -> String
 ) {
-    /** Convenience constructor used by the app. */
     constructor(identityManager: IdentityManager) : this({ identityManager.exportDHPublicKey() })
 
     private var rootKey: ByteArray = ByteArray(0)
@@ -46,8 +33,6 @@ class DoubleRatchet(
         val iAmA = compareBytes(myIdentityPub, theirIdentityPub) <= 0
         sendChainKey = if (iAmA) chainA else chainB
         recvChainKey = if (iAmA) chainB else chainA
-        // Do NOT wipe the "unused" chain here: sendChainKey/recvChainKey are
-        // references, so wiping would zero the array the ratchet is using.
         sendCounter = 0
         consumedRecv.clear()
         usedSendKeys.clear()
@@ -100,28 +85,6 @@ class DoubleRatchet(
                 index.toByte()
             )
         )
-    }
-
-    /** Diagnostic only: short fingerprints of the active chains. */
-    fun debugChains(): String {
-        fun fp(b: ByteArray) = CryptoUtils.sha256(b).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
-        return "sendChain=" + fp(sendChainKey) + " recvChain=" + fp(recvChainKey) + " sendCnt=" + sendCounter
-    }
-
-    /** Diagnostic only: fingerprint of the key that would decrypt [index]. */
-    fun debugRecvKey(index: Int): String {
-        val k = deriveMessageKey(recvChainKey, index)
-        val fp = CryptoUtils.sha256(k).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
-        CryptoUtils.wipe(k)
-        return fp
-    }
-
-    /** Diagnostic only: fingerprint of the key used to encrypt [index]. */
-    fun debugSendKey(index: Int): String {
-        val k = deriveMessageKey(sendChainKey, index)
-        val fp = CryptoUtils.sha256(k).copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
-        CryptoUtils.wipe(k)
-        return fp
     }
 
     private fun evict(map: LinkedHashMap<Int, ByteArray>) {

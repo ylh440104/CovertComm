@@ -147,9 +147,7 @@ class WifiAwareTransport(
             }
 
             override fun onServiceDiscovered(peer: PeerHandle, serviceSpecificInfo: ByteArray?, matchFilter: MutableList<ByteArray>?) {
-                // The subscriber must speak first: a passive subscriber otherwise
-                // never learns the publisher's PeerHandle and sendData stays stuck
-                // on "No NAN session or peer".
+
                 peerHandle = peer
                 listener?.onPeerDiscovered("nan:peer")
             }
@@ -184,7 +182,7 @@ class WifiAwareTransport(
             listener?.onTransportError("No NAN session or peer")
             return
         }
-        // Leave room for the fragment header within the NAN message limit.
+
         val chunk = (MESSAGE_MAX_NAN - FragmentCodec.HEADER).coerceAtLeast(16)
         val mid = messageId++
         val fragments = try {
@@ -217,8 +215,7 @@ class WifiAwareTransport(
             data,
             seqNum
         )
-        // Always go through the fragment envelope; chunking the raw frame bytes
-        // here would bypass reassembly on the other side.
+
         sendData(frame.toBytes())
     }
 

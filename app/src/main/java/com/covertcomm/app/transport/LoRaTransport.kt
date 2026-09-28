@@ -28,7 +28,7 @@ class LoRaTransport(
 
     companion object {
         const val LORA_MAX_PACKET = 255
-        // Payload available to the fragment codec inside one LoRa packet.
+
         const val LORA_MAX_PAYLOAD = LORA_MAX_PACKET - FragmentCodec.HEADER
         const val LORA_MAGIC: Byte = 0x7C
         const val LORA_BAUD = 9600
@@ -276,7 +276,7 @@ class LoRaTransport(
     }
 
     private fun sendFrame(frameBytes: ByteArray) {
-        // The 8-byte fragment header must fit inside a single LoRa packet.
+
         val chunk = LORA_MAX_PAYLOAD
         val msgId = (SecurityGuard.secureRandomBytes(1)[0].toInt() and 0xFF)
         val fragments = try {
@@ -287,7 +287,7 @@ class LoRaTransport(
         }
         for ((i, f) in fragments.withIndex()) {
             sendLoRaPacket(f)
-            // Give the radio time to drain before the next fragment.
+
             try {
                 Thread.sleep(if (fragments.size > 10) 2000L else 500L)
             } catch (_: InterruptedException) {}

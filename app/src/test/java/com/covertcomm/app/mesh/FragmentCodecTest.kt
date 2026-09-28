@@ -7,10 +7,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Covers the fragmentation used by the BLE / Wi-Fi Aware / LoRa transports. This
- * is pure byte handling, so it runs in CI without any radio hardware.
- */
 class FragmentCodecTest {
 
     private val magic: Byte = 0x7B
@@ -41,7 +37,7 @@ class FragmentCodecTest {
 
     @Test
     fun exactMultipleOfChunk() {
-        // The last fragment is exactly full, so lastLen must be chunk, not 0.
+
         val frame = ByteArray(40) { it.toByte() }
         roundTrip(frame, 20)
     }
@@ -64,7 +60,7 @@ class FragmentCodecTest {
         val fragments = FragmentCodec.fragment(magic, 9, frame, 20)
         val assembler = FragmentAssembler()
         var result: ByteArray? = null
-        // Send every fragment twice.
+
         for (f in fragments) {
             result = assembler.offer(FragmentCodec.decode(magic, f)!!) ?: result
             result = assembler.offer(FragmentCodec.decode(magic, f)!!) ?: result
@@ -74,8 +70,7 @@ class FragmentCodecTest {
 
     @Test
     fun differentStrideStillReassembles() {
-        // The sender's stride is carried in the header, so a receiver that never
-        // negotiated the same MTU must still reassemble correctly.
+
         val frame = ByteArray(333) { (it % 97).toByte() }
         val fragments = FragmentCodec.fragment(magic, 11, frame, 40)
         val assembler = FragmentAssembler()
@@ -92,7 +87,7 @@ class FragmentCodecTest {
         val fragments = FragmentCodec.fragment(magic, 5, frame, 20)
         val assembler = FragmentAssembler()
         var result: ByteArray? = null
-        // Drop the last fragment.
+
         for (i in 0 until fragments.size - 1) {
             result = assembler.offer(FragmentCodec.decode(magic, fragments[i])!!) ?: result
         }
