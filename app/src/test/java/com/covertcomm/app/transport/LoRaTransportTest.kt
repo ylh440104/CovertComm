@@ -79,7 +79,7 @@ class LoRaTransportTest {
     }
 
     private fun buildEndpoint(direction: Int): UsbEndpoint {
-        val ep = ReflectionHelpersNewInstance(UsbEndpoint::class.java)
+        val ep = newInstance(UsbEndpoint::class.java)
         Reflect.set(ep, "mAddress", if (direction == UsbConstants.USB_DIR_IN) 0x81 else 0x01)
         Reflect.set(ep, "mAttributes", UsbConstants.USB_ENDPOINT_XFER_BULK)
         Reflect.set(ep, "mMaxPacketSize", 64)
@@ -87,7 +87,7 @@ class LoRaTransportTest {
         return ep
     }
 
-    private fun ReflectionHelpersNewInstance(cls: Class<*>): Any {
+    private fun <T : Any> newInstance(cls: Class<T>): T {
         val ctor = cls.getDeclaredConstructor()
         ctor.isAccessible = true
         return ctor.newInstance()
@@ -97,7 +97,7 @@ class LoRaTransportTest {
         val epOut = buildEndpoint(UsbConstants.USB_DIR_OUT)
         val epIn = buildEndpoint(UsbConstants.USB_DIR_IN)
 
-        val iface = ReflectionHelpersNewInstance(UsbInterface::class.java)
+        val iface = newInstance(UsbInterface::class.java)
         Reflect.set(iface, "mId", 0)
         Reflect.set(iface, "mAlternateSetting", 0)
         Reflect.set(iface, "mName", "LoRa")
@@ -106,14 +106,14 @@ class LoRaTransportTest {
         Reflect.set(iface, "mProtocol", 0)
         Reflect.set(iface, "mEndpoints", arrayOf(epOut, epIn))
 
-        val config = ReflectionHelpersNewInstance(UsbConfiguration::class.java)
+        val config = newInstance(UsbConfiguration::class.java)
         Reflect.set(config, "mId", 1)
         Reflect.set(config, "mName", "config")
         Reflect.set(config, "mAttributes", 0x80)
         Reflect.set(config, "mMaxPower", 100)
         Reflect.set(config, "mInterfaces", arrayOf(iface))
 
-        val dev = ReflectionHelpersNewInstance(UsbDevice::class.java)
+        val dev = newInstance(UsbDevice::class.java)
         Reflect.set(dev, "mName", "/dev/bus/usb/001/002")
         Reflect.set(dev, "mVendorId", 0x1A86)
         Reflect.set(dev, "mProductId", 0x7523)
@@ -181,16 +181,19 @@ class LoRaTransportTest {
         t.listener = Recorder()
         t.init(router)
 
-        val payload = "lora-fragmented".toByteArray()
+        val payload = ByteArray(444) { (it % 251).toByte() }
         val frame = MeshFrame.create(
             MeshFrame.TYPE_DATA,
-            byteArrayOf(0x77, 0x88),
+            byteArrayOf(0x77, 0x88.toByte()),
             myFingerprint(),
             payload,
             5
         ).toBytes()
         val fragments = FragmentCodec.fragment(loraMagic, 11, frame, LoRaTransport.LORA_MAX_PAYLOAD)
         assertTrue("frame must be fragmented for the 247-byte payload limit", fragments.size > 1)
+        for (fragment in fragments) {
+            assertTrue("each fragment must fit a single LoRa packet", fragment.size <= 255)
+        }
 
         for (fragment in fragments) {
             Reflect.call(t, "handleIncomingBytes", fragment)
@@ -198,7 +201,7 @@ class LoRaTransportTest {
 
         assertEquals(1, received.size)
         assertArrayEquals(payload, received.first().first)
-        assertArrayEquals(byteArrayOf(0x77, 0x88), received.first().second)
+        assertArrayEquals(byteArrayOf(0x77, 0x88.toByte()), received.first().second)
     }
 
     @Test

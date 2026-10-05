@@ -1,7 +1,6 @@
 package com.covertcomm.app.transport
 
 import android.content.Context
-import android.content.Intent
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
@@ -10,7 +9,6 @@ import com.covertcomm.app.crypto.IdentityManager
 import com.covertcomm.app.testutil.Reflect
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -22,7 +20,6 @@ import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowWifiP2pManager
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
@@ -188,7 +185,7 @@ class WifiDirectTransportTest {
         Reflect.call(this, "connectToHost", host, port)
     }
 
-    private fun waitFor(condition: () -> Boolean, timeoutMs: Long = 6000): Boolean {
+    private fun waitFor(timeoutMs: Long = 6000, condition: () -> Boolean): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (condition()) return true

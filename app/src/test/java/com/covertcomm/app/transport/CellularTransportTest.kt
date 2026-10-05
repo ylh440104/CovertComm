@@ -15,7 +15,6 @@ import org.robolectric.annotation.Config
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -139,7 +138,7 @@ class CellularTransportTest {
         return "cc/" + h.copyOfRange(0, 6).joinToString("") { "%02x".format(it) }
     }
 
-    private fun waitFor(condition: () -> Boolean, timeoutMs: Long = 6000): Boolean {
+    private fun waitFor(timeoutMs: Long = 6000, condition: () -> Boolean): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (condition()) return true

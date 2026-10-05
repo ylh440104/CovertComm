@@ -25,7 +25,6 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadow.api.Shadow
-import org.robolectric.shadows.ShadowBluetoothAdapter
 import org.robolectric.shadows.ShadowBluetoothDevice
 import org.robolectric.shadows.ShadowBluetoothGatt
 import org.robolectric.shadows.ShadowBluetoothGattServer
@@ -40,7 +39,6 @@ class BleMeshTransportTest {
     private lateinit var identity: IdentityManager
     private lateinit var adapter: android.bluetooth.BluetoothAdapter
     private var transport: BLEMeshTransport? = null
-
     private val fragMagic: Byte = 0x7B
 
     private class RouterRecorder : MeshRouter.RouterListener {
@@ -72,7 +70,7 @@ class BleMeshTransportTest {
         identity = IdentityManager(context)
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         adapter = manager.adapter
-        ShadowBluetoothAdapter.setEnabled(true)
+        adapter.enable()
     }
 
     @After
@@ -211,7 +209,7 @@ class BleMeshTransportTest {
                 captured.add(characteristic.value.copyOf())
             }
         })
-        shadowGatt.discoverServices()
+        gatt.discoverServices()
 
         Reflect.set(t, "connectedGatt", gatt)
 
@@ -265,7 +263,7 @@ class BleMeshTransportTest {
                 captured.add(characteristic.value.copyOf())
             }
         })
-        shadowGatt.discoverServices()
+        gatt.discoverServices()
         Reflect.set(t, "connectedGatt", gatt)
 
         Reflect.call(t, "onMtuChanged", device, 247)
