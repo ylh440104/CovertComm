@@ -154,6 +154,8 @@ class LoRaTransportTest {
 
         val connection = Reflect.field(t, "connection") as? UsbDeviceConnection
         assertTrue(connection != null)
+        Reflect.field(t, "serialReader")?.let { Reflect.call(it, "stop") }
+        Thread.sleep(100)
         val shadowConn = Shadow.extract<ShadowUsbDeviceConnection>(connection)
         val written = readAll(shadowConn.outgoingDataStream)
         val text = String(written, Charsets.UTF_8)
@@ -180,6 +182,8 @@ class LoRaTransportTest {
         transport = t
         t.listener = Recorder()
         t.init(router)
+        Reflect.field(t, "serialReader")?.let { Reflect.call(it, "stop") }
+        Thread.sleep(50)
 
         val payload = ByteArray(444) { (it % 251).toByte() }
         val frame = MeshFrame.create(
@@ -222,6 +226,8 @@ class LoRaTransportTest {
         transport = t
         t.listener = Recorder()
         t.init(router)
+        Reflect.field(t, "serialReader")?.let { Reflect.call(it, "stop") }
+        Thread.sleep(50)
 
         val payload = ByteArray(200) { (it % 251).toByte() }
         val frame = MeshFrame.create(MeshFrame.TYPE_DATA, byteArrayOf(0x01, 0x02), myFingerprint(), payload, 1).toBytes()
@@ -238,11 +244,19 @@ class LoRaTransportTest {
     private fun readAll(stream: InputStream): ByteArray {
         val out = ByteArrayOutputStream()
         val buffer = ByteArray(4096)
-        while (true) {
-            val read = stream.read(buffer)
+        var idle = 0
+        val deadline = System.currentTimeMillis() + 3000
+        while (System.currentTimeMillis() < deadline && idle < 5) {
+            val available = try { stream.available() } catch (_: Exception) { 0 }
+            if (available <= 0) {
+                idle++
+                Thread.sleep(10)
+                continue
+            }
+            idle = 0
+            val read = try { stream.read(buffer, 0, minOf(buffer.size, available)) } catch (_: Exception) { -1 }
             if (read <= 0) break
             out.write(buffer, 0, read)
-            if (read < buffer.size) break
         }
         return out.toByteArray()
     }
