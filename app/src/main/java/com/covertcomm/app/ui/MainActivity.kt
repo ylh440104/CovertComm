@@ -522,7 +522,7 @@ class MainActivity : ComponentActivity() {
             pendingOutgoing = text
             messages.add(ChatMessage(text, true, burnAfterRead = burnAfterRead))
             messages.add(ChatMessage("[Handshake initiated, message queued...]", false))
-            sendHandshake()
+            if (statusConnected.value) sendHandshake()
             return
         }
         val plaintext = text.toByteArray(Charsets.UTF_8)
