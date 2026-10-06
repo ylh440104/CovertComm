@@ -2,7 +2,9 @@ name: hardware-sim-tests
 
 on:
   push:
-    branches: [ ci-verify ]
+    branches: [ main, ci-verify ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:

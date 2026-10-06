@@ -16,11 +16,6 @@ import org.robolectric.annotation.Config
 import java.net.ServerSocket
 import java.net.Socket
 
-/**
- * End-to-end test of the real MainActivity protocol: two activity instances perform the real
- * X3DH + ML-KEM handshake, the real pq_exchange and exchange real encrypted chat messages over a
- * real TCP socket pair. No hand-written protocol model is involved.
- */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class HandshakeEndToEndTest {

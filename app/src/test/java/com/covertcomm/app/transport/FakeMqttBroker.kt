@@ -11,15 +11,7 @@ import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-
-/**
- * A minimal MQTT 3.1.1 broker that speaks exactly the subset of the protocol that
- * CellularTransport implements: CONNECT/CONNACK, SUBSCRIBE/SUBACK, PUBLISH (QoS1) with PUBACK,
- * PINGREQ/PINGRESP. It can push encrypted frames to every subscribed client, which lets tests
- * exercise the real client without any real network hardware.
- */
 class FakeMqttBroker {
-
     data class Publication(val topic: String, val payload: ByteArray)
 
     private val server = ServerSocket(0)
@@ -134,7 +126,6 @@ class FakeMqttBroker {
         }
     }
 
-    /** Pushes a QoS1 PUBLISH to every client subscribed to [topic], mimicking a real broker. */
     fun push(topic: String, payload: ByteArray) {
         var packetId = 1
         for (client in clients) {

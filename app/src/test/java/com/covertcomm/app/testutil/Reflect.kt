@@ -3,10 +3,6 @@ package com.covertcomm.app.testutil
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 
-/**
- * Small reflection helper so tests can drive parts of the transports that the Android
- * shadows do not expose (private sockets, injected peers, etc.) without changing production code.
- */
 object Reflect {
 
     fun field(target: Any, name: String): Any? {
