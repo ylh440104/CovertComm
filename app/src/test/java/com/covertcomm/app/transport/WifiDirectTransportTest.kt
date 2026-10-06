@@ -120,6 +120,7 @@ class WifiDirectTransportTest {
         device.deviceAddress = "02:00:00:00:00:01"
         map[device.deviceAddress] = device
 
+        Reflect.set(t, "isHost", true)
         Reflect.call(t, "handlePeers", peers)
         assertTrue("discovered peer must be reported", recorder.peers.contains("PeerDevice"))
     }
@@ -144,6 +145,8 @@ class WifiDirectTransportTest {
         info.groupFormed = true
         info.isGroupOwner = true
         Reflect.call(t, "handleConnectionInfo", info)
+
+        assertTrue("group owner must open the server socket", waitFor { Reflect.field(t, "serverSocket") != null })
 
         val socket = Socket("127.0.0.1", 8888)
         peer = socket

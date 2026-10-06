@@ -25,6 +25,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowBluetoothAdapter
 import org.robolectric.shadows.ShadowBluetoothDevice
 import org.robolectric.shadows.ShadowBluetoothGatt
 import org.robolectric.shadows.ShadowBluetoothGattServer
@@ -109,13 +110,13 @@ class BleMeshTransportTest {
     }
 
     @Test
-    fun initFailsWhenNoAdvertiser() {
-        adapter.enable()
+    fun initFailsWhenBluetoothUnsupported() {
+        ShadowBluetoothAdapter.setIsBluetoothSupported(false)
         val recorder = LinkRecorder()
         val t = newTransport()
         t.listener = recorder
-        assertFalse("init must fail without an advertiser", t.init(MeshRouter(myFingerprint())))
-        assertTrue(recorder.errors.any { it.contains("advertising not supported") })
+        assertFalse("init must fail when Bluetooth is unavailable", t.init(MeshRouter(myFingerprint())))
+        assertTrue(recorder.errors.any { it.contains("Bluetooth not supported") })
     }
 
     @Test
@@ -266,7 +267,8 @@ class BleMeshTransportTest {
         gatt.discoverServices()
         Reflect.set(t, "connectedGatt", gatt)
 
-        Reflect.call(t, "onMtuChanged", device, 247)
+        val serverCallback = Reflect.field(t, "gattServerCallback")!!
+        Reflect.call(serverCallback, "onMtuChanged", device, 247)
 
         val payload = ByteArray(600) { (it % 251).toByte() }
         t.sendData(byteArrayOf(0x01, 0x02), payload)

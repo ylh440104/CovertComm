@@ -137,6 +137,7 @@ class WifiAwareTransportTest {
         val t = newTransport()
         t.listener = recorder
         t.init(MeshRouter(myFingerprint()))
+        shadowOf(Looper.getMainLooper()).idle()
         t.setPassphrase("aware-secret")
         t.startPublish()
 
